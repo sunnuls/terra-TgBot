@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+bot_log.txt
+
+# Backups
+reports_backup_*.db
+
+# Documentation
+*.md
+!README.md
+
+# Tests
+test_*.py
+check_*.py
+
+# Local config (будут монтироваться как volumes)
+.env.local
+.env.development
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+

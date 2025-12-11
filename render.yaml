@@ -1,0 +1,16 @@
+services:
+  - type: worker
+    name: telegram-bot-polya
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot_polya.py
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: TZ
+        value: Europe/Moscow
+    # Добавьте остальные переменные окружения через Render Dashboard
+
+
+

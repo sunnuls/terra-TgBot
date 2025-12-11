@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: telegram-bot-polya
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      # Сохранение базы данных между перезапусками
+      - ./reports.db:/app/reports.db
+      # Сохранение Google токенов
+      - ./token.json:/app/token.json
+      - ./oauth_client.json:/app/oauth_client.json
+      - ./service_account.json:/app/service_account.json
+    # Логирование
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+
+

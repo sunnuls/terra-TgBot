@@ -1,0 +1,44 @@
+# Токен бота Telegram (получите у @BotFather)
+BOT_TOKEN=your_bot_token_here
+
+# Часовой пояс (по умолчанию Москва)
+TZ=Europe/Moscow
+
+# ID администраторов (через запятую, без пробелов)
+ADMIN_IDS=
+
+# Username администраторов (через запятую, без @)
+ADMIN_USERNAMES=
+
+# Доп. роли (через запятую): IT и TIM
+# IT_IDS могут использовать тестовые команды и видеть расширенное меню
+IT_IDS=
+# TIM_IDS — специальные пользователи (TIM)
+TIM_IDS=
+
+# ===== Google Sheets настройки =====
+
+# OAuth клиент для Google API (путь к файлу oauth_client.json)
+OAUTH_CLIENT_JSON=oauth_client.json
+
+# Путь к файлу с токеном (создастся автоматически после первой авторизации)
+TOKEN_JSON_PATH=token.json
+
+# ID папки на Google Drive, куда будут сохраняться таблицы
+# Получить ID папки: откройте папку на Drive, скопируйте ID из URL
+# https://drive.google.com/drive/folders/[ВОТ_ЭТО_ID]
+DRIVE_FOLDER_ID=
+
+# Префикс для названия таблиц (по умолчанию "WorkLog")
+EXPORT_PREFIX=WorkLog
+
+# Включить автоматический экспорт (true/false)
+AUTO_EXPORT_ENABLED=false
+
+# Расписание автоматического экспорта в формате cron (5 чисел через пробел)
+# Формат: минута час день месяц день_недели
+# Примеры:
+# 0 9 * * 1    - каждый понедельник в 9:00
+# 0 0 * * 0    - каждое воскресенье в 00:00
+# 0 18 * * 5   - каждую пятницу в 18:00
+AUTO_EXPORT_CRON=0 9 * * 1

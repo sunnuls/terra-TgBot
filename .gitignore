@@ -1,0 +1,60 @@
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+*.log
+.DS_Store
+.idea/
+.vscode/
+.env
+.env.*
+reports.db
+*.db
+*.sqlite3
+*.sqlite
+*.bak
+coverage/
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.cache/
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Database
+*.db
+reports_backup_*.db
+
+# Sensitive files
+.env
+token.json
+oauth_client.json
+service_account.json
+bot_log.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
