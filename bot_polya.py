@@ -109,7 +109,7 @@ def _runtime_version_info(user_id: int, username: Optional[str]) -> str:
         f"started: <code>{STARTED_AT.strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
         f"file_mtime: <code>{mtime}</code>\n"
         f"role: <code>{role}</code>\n"
-        f"user: <code>{user_id}</code> @{uname if uname else '-'}</code>"
+        f"user: <code>{user_id}</code> @{uname if uname else '-'}"
     )
 
 
