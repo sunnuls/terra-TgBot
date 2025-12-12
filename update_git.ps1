@@ -10,18 +10,33 @@ if (-not $repoRoot) {
     $repoRoot = '.'
 }
 
+function Invoke-Git {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string[]]$Args
+    )
+
+    & git @Args
+    if ($LASTEXITCODE -ne 0) {
+        throw "git $($Args -join ' ') failed with exit code $LASTEXITCODE"
+    }
+}
+
 Push-Location $repoRoot
 try {
-    $status = git status --porcelain=v1
+    $status = & git status --porcelain=v1
+    if ($LASTEXITCODE -ne 0) {
+        throw "git status failed with exit code $LASTEXITCODE"
+    }
     if (-not $status) {
         Write-Host "No local changes to commit. Skipping push."
         exit 0
     }
 
-    git add -A
-    git commit -m $Message
-    git pull --rebase
-    git push
+    Invoke-Git -Args @('add','-A')
+    Invoke-Git -Args @('commit','-m', $Message)
+    Invoke-Git -Args @('pull','--rebase')
+    Invoke-Git -Args @('push')
 
     Write-Host "Repository updated on remote."
 }
