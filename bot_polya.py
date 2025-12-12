@@ -215,10 +215,50 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip()
 # Константы (дефолтные справочники)
 # -----------------------------
 
-DEFAULT_FIELDS = [
-    "Северное","Фазенда","5 га","58 га","Фермерское","Сад",
-    "Чеки №1","Чеки №2","Чеки №3","Рогачи (б)","Рогачи(М)",
-    "Владимирова Аренда","МТФ",
+FIELD_LOCATIONS = [
+    "Фазенда",
+    "Чеки Куропятника",
+    "58га",
+    "Фермерское",
+    "Северное",
+    "Чеки",
+    "МТФ №3",
+    "Рогачи(Б)",
+    "Рогачи(М)",
+    "Аренда Третьяк",
+]
+
+DEFAULT_FIELDS = FIELD_LOCATIONS
+
+CROPS_LIST = [
+    "Нет культуры",
+    "Кабачок",
+    "Картошка",
+    "Подсолнечник",
+    "Кукуруза",
+    "Пшеница",
+    "Горох",
+    "Прочее",
+]
+
+KAMAZ_CARGO_LIST = [
+    "Нет культуры",
+    "Кабачок",
+    "Картошка",
+    "Подсолнечник",
+    "Кукуруза",
+    "Пшеница",
+    "Горох",
+    "Навоз",
+    "Прочее",
+]
+
+BRIG_HAND_ACTIVITIES = [
+    "ПХР",
+    "Ремонт",
+    "Лесополосы",
+    "Прополка",
+    "Уборка",
 ]
 
 DEFAULT_TECH = [
@@ -243,32 +283,13 @@ OTD_TRACTOR_WORKS = [
     "Сев", "Опрыскивание", "МК", "Боронование", "Уборка", "Дискование", "Пахота", "Чизелевание", "Навоз", "Прочее",
 ]
 OTD_FIELDS = [
-    "58 га",
-    "Аренда Третьяк (40 га)",
-    "МТФ",
-    "Рогачи (б)",
-    "Рогачи(М)",
-    "Северное",
-    "Фазенда",
-    "Фермерское",
-    "Чеки Куропятника",
-    "Аренда Третьяк",
-    "Прочее",
+    *FIELD_LOCATIONS,
 ]
 OTD_CROPS = [
-    "Кабачок",
-    "Картошка",
-    "Подсолнечник",
-    "Кукуруза",
-    "Пшеница",
-    "Горох",
-    "Прочее",
+    *CROPS_LIST,
 ]
 OTD_HAND_WORKS = [
-    "Лесополоса",
-    "Прополка",
-    "Сев",
-    "Уборка",
+    *BRIG_HAND_ACTIVITIES,
     "Прочее",
 ]
 
@@ -657,6 +678,11 @@ def remove_activity(name: str) -> bool:
         return cur.rowcount > 0
 
 def list_locations(grp: str) -> List[str]:
+    # Жестко фиксируем порядок и состав локаций по требованию (поля/склад).
+    if grp == GROUP_FIELDS:
+        return list(FIELD_LOCATIONS)
+    if grp == GROUP_WARE:
+        return ["Склад"]
     with connect() as con, closing(con.cursor()) as c:
         rows = c.execute("SELECT name FROM locations WHERE grp=? ORDER BY name", (grp,)).fetchall()
         return [r[0] for r in rows]
@@ -1838,6 +1864,10 @@ def otd_fields_kb(back_to:str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for f_name in OTD_FIELDS:
         kb.button(text=f_name, callback_data=f"{back_to}:{f_name}")
+    # отдельной опцией
+    kb.button(text="Склад", callback_data=f"{back_to}:Склад")
+    # свободный ввод
+    kb.button(text="Прочее", callback_data=f"{back_to}:__other__")
     kb.adjust(2)
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:fieldprev"))
     return kb.as_markup()
@@ -1880,6 +1910,11 @@ def locations_kb(kind: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for n in names:
         kb.button(text=n, callback_data=f"work:loc:{kind}:{n}")
+    if kind == "fields":
+        # отдельной опцией
+        kb.button(text="Склад", callback_data="work:loc:ware:Склад")
+        # свободный ввод
+        kb.button(text="Прочее", callback_data="work:loc:fields:__other__")
     kb.button(text="🔙 Назад", callback_data="work:back:locgrp")
     kb.adjust(2)
     return kb.as_markup()
@@ -2739,24 +2774,38 @@ async def otd_pick_date(c: CallbackQuery, state: FSMContext):
                         "Введите часы (можно кнопками):", reply_markup=otd_hours_keyboard())
     await c.answer()
 
-async def _otd_set_hours(bot: Bot, chat_id: int, user_id: int, state: FSMContext, hours: int):
+async def _otd_set_hours(bot: Bot, chat_id: int, user_id: int, state: FSMContext, hours: int) -> tuple[bool, Optional[str]]:
     if hours < 1 or hours > 24:
         await _edit_or_send(bot, chat_id, user_id, "Часы должны быть от 1 до 24. Введите снова:",
                             reply_markup=otd_hours_keyboard())
-        return
+        return False, "Часы должны быть от 1 до 24."
     data = await state.get_data()
     work = data.get("otd", {})
+    # проверка лимита 24 часа сразу на этапе ввода часов
+    if work.get("work_date"):
+        already = sum_hours_for_user_date(user_id, work["work_date"])
+        if already + hours > 24:
+            await _edit_or_send(
+                bot, chat_id, user_id,
+                f"❗ В сутки нельзя больше 24 ч.\nНа {work['work_date']} уже учтено {already} ч. Выберите другое количество:",
+                reply_markup=otd_hours_keyboard()
+            )
+            return False, "В сутки нельзя больше 24 ч."
     work["hours"] = hours
     await state.update_data(otd=work)
     await state.set_state(OtdFSM.pick_type)
     await _edit_or_send(bot, chat_id, user_id,
                         "Выберите тип работы:", reply_markup=otd_type_keyboard())
+    return True, None
 
 @router.callback_query(F.data.startswith("otd:hours:"))
 async def otd_pick_hours_cb(c: CallbackQuery, state: FSMContext):
     hours = int(c.data.split(":", 2)[2])
-    await _otd_set_hours(c.bot, c.message.chat.id, c.from_user.id, state, hours)
-    await c.answer()
+    ok, alert = await _otd_set_hours(c.bot, c.message.chat.id, c.from_user.id, state, hours)
+    if alert and not ok:
+        await c.answer(alert, show_alert=True)
+    else:
+        await c.answer()
 
 @router.message(OtdFSM.pick_hours)
 async def otd_pick_hours_msg(message: Message, state: FSMContext):
@@ -2765,7 +2814,9 @@ async def otd_pick_hours_msg(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("Введите число часов (1-24) или нажмите кнопку.")
         return
-    await _otd_set_hours(message.bot, message.chat.id, message.from_user.id, state, hours)
+    ok, alert = await _otd_set_hours(message.bot, message.chat.id, message.from_user.id, state, hours)
+    if alert and not ok:
+        await message.answer(alert)
 
 @router.callback_query(F.data.startswith("otd:type:"))
 async def otd_pick_type(c: CallbackQuery, state: FSMContext):
@@ -2841,8 +2892,19 @@ async def otd_pick_field(c: CallbackQuery, state: FSMContext):
     field = c.data.split(":", 2)[2]
     data = await state.get_data()
     work = data.get("otd", {})
+    if field == "__other__":
+        work["location_custom_stage"] = "field"
+        await state.update_data(otd=work)
+        await state.set_state(OtdFSM.pick_location)
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            "Введите название поля (свободная форма):",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:loccustom")]
+                            ]))
+        await c.answer()
+        return
     work["location"] = field
-    work["location_grp"] = GROUP_FIELDS
+    work["location_grp"] = GROUP_WARE if field == "Склад" else GROUP_FIELDS
     await state.update_data(otd=work)
     await state.set_state(OtdFSM.pick_crop)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
@@ -2907,11 +2969,57 @@ async def otd_pick_load(c: CallbackQuery, state: FSMContext):
     loc = c.data.split(":", 2)[2]
     data = await state.get_data()
     work = data.get("otd", {})
+    if loc == "__other__":
+        work["location_custom_stage"] = "load"
+        await state.update_data(otd=work)
+        await state.set_state(OtdFSM.pick_location)
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            "Введите место погрузки (свободная форма):",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:loccustom")]
+                            ]))
+        await c.answer()
+        return
     work["location"] = loc
-    work["location_grp"] = GROUP_FIELDS
+    work["location_grp"] = GROUP_WARE if loc == "Склад" else GROUP_FIELDS
     await state.update_data(otd=work)
     await _otd_to_confirm(c.bot, c.message.chat.id, c.from_user.id, state)
     await c.answer()
+
+@router.callback_query(F.data == "otd:back:loccustom")
+async def otd_back_loccustom(c: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    work = data.get("otd", {})
+    stage = work.get("location_custom_stage") or "field"
+    await state.set_state(OtdFSM.pick_location)
+    kb = otd_fields_kb("otd:load" if stage == "load" else "otd:field")
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Выберите место:" if stage == "load" else "Выберите поле:",
+                        reply_markup=kb)
+    await c.answer()
+
+@router.message(OtdFSM.pick_location)
+async def otd_pick_location_custom(message: Message, state: FSMContext):
+    loc = (message.text or "").strip()
+    if not loc:
+        await message.answer("Введите значение текстом.")
+        return
+    data = await state.get_data()
+    work = data.get("otd", {})
+    stage = work.get("location_custom_stage")
+    if stage not in ("field", "load"):
+        # не ждём кастомную локацию — игнор
+        return
+    work["location"] = loc
+    work["location_grp"] = GROUP_WARE if loc == "Склад" else GROUP_FIELDS
+    work.pop("location_custom_stage", None)
+    await state.update_data(otd=work)
+    if stage == "load":
+        await _otd_to_confirm(message.bot, message.chat.id, message.from_user.id, state)
+    else:
+        await state.set_state(OtdFSM.pick_crop)
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
+                            "Культура:", reply_markup=otd_crops_kb())
 
 @router.callback_query(F.data == "otd:confirm:edit")
 async def otd_confirm_edit(c: CallbackQuery, state: FSMContext):
@@ -3016,10 +3124,10 @@ def _brig_hours_kb() -> InlineKeyboardMarkup:
 
 def _brig_ob_crop_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="Кабачок", callback_data="brig:crop:Кабачок")
-    kb.button(text="Картошка", callback_data="brig:crop:Картошка")
+    for crop in CROPS_LIST:
+        kb.button(text=crop, callback_data=f"brig:crop:{crop}")
     kb.button(text="🔙 Назад", callback_data="brig:back:hours")
-    kb.adjust(2, 1)
+    kb.adjust(2, 2)
     return kb.as_markup()
 
 def _format_brig_ob_summary(brig: dict) -> str:
@@ -3146,7 +3254,7 @@ async def brig_pick_mode(c: CallbackQuery, state: FSMContext):
     if mode == "hand":
         await state.set_state(BrigFSM.pick_activity)
         kb = InlineKeyboardBuilder()
-        for act in ["Лесополоса", "Прополка", "Сев", "Уборка"]:
+        for act in BRIG_HAND_ACTIVITIES:
             kb.button(text=act, callback_data=f"brig:act:{act}")
         kb.button(text="Прочее", callback_data="brig:act:__other__")
         kb.button(text="🔙 Назад", callback_data="brig:back:mode")
@@ -3201,7 +3309,7 @@ async def brig_pick_machine_kind(c: CallbackQuery, state: FSMContext):
         await state.update_data(brig=brig)
         await state.set_state(BrigFSM.pick_kamaz_crop)
         kb = InlineKeyboardBuilder()
-        for name in ["Кабачок", "Картошка", "Подсолнечник", "Кукуруза", "Пшеница", "Горох", "Навоз", "Прочее"]:
+        for name in KAMAZ_CARGO_LIST:
             kb.button(text=name, callback_data=f"brig:kcrop:{name}")
         kb.button(text="🔙 Назад", callback_data="brig:back:mkind")
         kb.adjust(2,2)
@@ -3299,7 +3407,7 @@ async def brig_pick_machine_activity(c: CallbackQuery, state: FSMContext):
         await state.update_data(brig=brig)
         await state.set_state(BrigFSM.pick_machine_crop)
         kb = InlineKeyboardBuilder()
-        for crop in ["Кабачок", "Картошка", "Подсолнечник", "Кукуруза", "Пшеница", "Горох", "Прочее"]:
+        for crop in CROPS_LIST:
             kb.button(text=crop, callback_data=f"brig:mcrop:{crop}")
         kb.button(text="🔙 Назад", callback_data="brig:back:mact")
     kb.adjust(2,2)
@@ -3332,7 +3440,7 @@ async def brig_pick_machine_activity_custom(message: Message, state: FSMContext)
     await state.update_data(brig=brig)
     await state.set_state(BrigFSM.pick_machine_crop)
     kb = InlineKeyboardBuilder()
-    for crop in ["Кабачок", "Картошка", "Подсолнечник", "Кукуруза", "Пшеница", "Горох", "Прочее"]:
+    for crop in CROPS_LIST:
         kb.button(text=crop, callback_data=f"brig:mcrop:{crop}")
     kb.button(text="🔙 Назад", callback_data="brig:back:mact")
     kb.adjust(2,2)
@@ -3379,7 +3487,7 @@ async def brig_pick_machine_crop(c: CallbackQuery, state: FSMContext):
 async def brig_back_mcrop(c: CallbackQuery, state: FSMContext):
     await state.set_state(BrigFSM.pick_machine_crop)
     kb = InlineKeyboardBuilder()
-    for crop in ["Кабачок", "Картошка", "Подсолнечник", "Кукуруза", "Пшеница", "Горох", "Прочее"]:
+    for crop in CROPS_LIST:
         kb.button(text=crop, callback_data=f"brig:mcrop:{crop}")
     kb.button(text="🔙 Назад", callback_data="brig:back:mact")
     kb.adjust(2,2)
@@ -3444,7 +3552,7 @@ async def brig_kamaz_crop(c: CallbackQuery, state: FSMContext):
 async def brig_back_kcrop(c: CallbackQuery, state: FSMContext):
     await state.set_state(BrigFSM.pick_kamaz_crop)
     kb = InlineKeyboardBuilder()
-    for name in ["Кабачок", "Картошка", "Подсолнечник", "Кукуруза", "Пшеница", "Горох", "Навоз", "Прочее"]:
+    for name in KAMAZ_CARGO_LIST:
         kb.button(text=name, callback_data=f"brig:kcrop:{name}")
     kb.button(text="🔙 Назад", callback_data="brig:back:mkind")
     kb.adjust(2,2)
@@ -3623,7 +3731,7 @@ async def brig_back_crop(c: CallbackQuery, state: FSMContext):
                             "Выберите культуру:", reply_markup=_brig_ob_crop_kb())
     else:
         kb = InlineKeyboardBuilder()
-        for crop in ["Кабачок", "Картошка", "Подсолнечник", "Кукуруза", "Пшеница", "Горох", "Прочее"]:
+        for crop in CROPS_LIST:
             kb.button(text=crop, callback_data=f"brig:crop:{crop}")
         kb.button(text="🔙 Назад", callback_data="brig:back:activity")
         kb.adjust(2,2)
@@ -3665,7 +3773,7 @@ async def brig_pick_activity(c: CallbackQuery, state: FSMContext):
     else:
         await state.set_state(BrigFSM.pick_crop)
         kb = InlineKeyboardBuilder()
-        for crop in ["Кабачок", "Картошка", "Подсолнечник", "Кукуруза", "Пшеница", "Горох", "Прочее"]:
+        for crop in CROPS_LIST:
             kb.button(text=crop, callback_data=f"brig:crop:{crop}")
         kb.button(text="🔙 Назад", callback_data="brig:back:activity")
         kb.adjust(2,2)
@@ -3688,7 +3796,7 @@ async def brig_pick_activity_custom(message: Message, state: FSMContext):
     await state.update_data(brig=brig)
     await state.set_state(BrigFSM.pick_crop)
     kb = InlineKeyboardBuilder()
-    for crop in ["Кабачок", "Картошка", "Подсолнечник", "Кукуруза", "Пшеница", "Горох", "Прочее"]:
+    for crop in CROPS_LIST:
         kb.button(text=crop, callback_data=f"brig:crop:{crop}")
     kb.button(text="🔙 Назад", callback_data="brig:back:activity")
     kb.adjust(2,2)
@@ -3699,7 +3807,7 @@ async def brig_pick_activity_custom(message: Message, state: FSMContext):
 async def brig_back_activity(c: CallbackQuery, state: FSMContext):
     await state.set_state(BrigFSM.pick_activity)
     kb = InlineKeyboardBuilder()
-    for act in ["Лесополоса", "Прополка", "Сев", "Уборка"]:
+    for act in BRIG_HAND_ACTIVITIES:
         kb.button(text=act, callback_data=f"brig:act:{act}")
     kb.button(text="Прочее", callback_data="brig:act:__other__")
     kb.button(text="🔙 Назад", callback_data="brig:back:mode")
@@ -3939,7 +4047,7 @@ async def brig_confirm_back(c: CallbackQuery, state: FSMContext):
     if target == "tech_crop":
         await state.set_state(BrigFSM.pick_machine_crop)
         kb = InlineKeyboardBuilder()
-        for crop in ["Кабачок", "Картошка", "Подсолнечник", "Кукуруза", "Пшеница", "Горох", "Прочее"]:
+        for crop in CROPS_LIST:
             kb.button(text=crop, callback_data=f"brig:mcrop:{crop}")
         kb.button(text="🔙 Назад", callback_data="brig:back:mact")
         kb.adjust(2,2)
@@ -4546,12 +4654,43 @@ async def pick_location(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     work = data.get("work", {})
     work["loc_grp"] = grp
+    if loc == "__other__":
+        await state.update_data(work=work, awaiting_custom_location=lg)
+        await state.set_state(WorkFSM.pick_location)
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            "Введите локацию (свободная форма):",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="🔙 Назад", callback_data=f"work:locgrp:{lg}")]
+                            ]))
+        await c.answer()
+        return
     work["location"] = loc
-    await state.update_data(work=work)
+    await state.update_data(work=work, awaiting_custom_location=None)
     await state.set_state(WorkFSM.pick_date)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                         "Выберите <b>дату</b>:", reply_markup=days_keyboard())
     await c.answer()
+
+@router.message(
+    StateFilter(WorkFSM.pick_location),
+    F.text & F.text.len() > 0
+)
+async def maybe_capture_custom_location(message: Message, state: FSMContext):
+    data = await state.get_data()
+    lg = data.get("awaiting_custom_location")
+    if not lg:
+        return
+    loc = (message.text or "").strip()
+    if not loc:
+        return
+    grp = GROUP_FIELDS if lg=="fields" else GROUP_WARE
+    work = data.get("work", {})
+    work["loc_grp"] = grp
+    work["location"] = loc
+    await state.update_data(work=work, awaiting_custom_location=None)
+    await state.set_state(WorkFSM.pick_date)
+    await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
+                        "Выберите <b>дату</b>:", reply_markup=days_keyboard())
 
 @router.callback_query(F.data.startswith("work:date:"))
 async def pick_date(c: CallbackQuery, state: FSMContext):
