@@ -56,6 +56,62 @@ logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 assert TOKEN, "❌ Ошибка: TELEGRAM_TOKEN или BOT_TOKEN не найден в .env"
 
+STARTED_AT = datetime.now()
+
+def _read_git_short_sha(repo_dir: Path) -> Optional[str]:
+    """
+    Best-effort git SHA reader without requiring `git` binary.
+    Works when `.git` is present in the runtime filesystem (e.g., on server checkout).
+    """
+    try:
+        head_path = repo_dir / ".git" / "HEAD"
+        if not head_path.exists():
+            return None
+        head = head_path.read_text(encoding="utf-8", errors="ignore").strip()
+        sha: Optional[str] = None
+
+        if head.startswith("ref:"):
+            ref = head.split(":", 1)[1].strip()
+            ref_path = repo_dir / ".git" / Path(ref)
+            if ref_path.exists():
+                sha = ref_path.read_text(encoding="utf-8", errors="ignore").strip()
+            else:
+                packed = repo_dir / ".git" / "packed-refs"
+                if packed.exists():
+                    for line in packed.read_text(encoding="utf-8", errors="ignore").splitlines():
+                        line = line.strip()
+                        if not line or line.startswith("#") or line.startswith("^"):
+                            continue
+                        parts = line.split(" ", 1)
+                        if len(parts) == 2 and parts[1].strip() == ref:
+                            sha = parts[0].strip()
+                            break
+        else:
+            sha = head
+
+        if sha and len(sha) >= 7:
+            return sha[:7]
+        return sha
+    except Exception:
+        return None
+
+def _runtime_version_info(user_id: int, username: Optional[str]) -> str:
+    repo_dir = Path(__file__).resolve().parent
+    sha = os.getenv("GIT_SHA", "").strip() or _read_git_short_sha(repo_dir) or "unknown"
+    try:
+        mtime = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        mtime = "unknown"
+    role = get_role_label(user_id)
+    uname = (username or "").lstrip("@")
+    return (
+        f"version: <code>{sha}</code>\n"
+        f"started: <code>{STARTED_AT.strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
+        f"file_mtime: <code>{mtime}</code>\n"
+        f"role: <code>{role}</code>\n"
+        f"user: <code>{user_id}</code> @{uname if uname else '-'}</code>"
+    )
+
 
 TZ = os.getenv("TZ", "Europe/Moscow").strip()
 
@@ -2140,6 +2196,13 @@ async def cmd_where(message: Message):
         f"chat_id: <code>{message.chat.id}</code>\n"
         f"thread_id: <code>{tid if tid is not None else '-'}</code>\n"
         f"user_id: <code>{message.from_user.id}</code>")
+
+@router.message(Command("version"))
+async def cmd_version(message: Message):
+    # Проверяем разрешенную тему для команд
+    if not _is_allowed_topic(message):
+        return
+    await message.answer(_runtime_version_info(message.from_user.id, message.from_user.username))
 
 @router.message(Command("menu"))
 async def cmd_menu(message: Message, state: FSMContext):
@@ -5315,6 +5378,7 @@ async def main():
             BotCommand(command="my", description="Моя статистика (неделя)"),
             BotCommand(command="menu", description="Открыть меню бота"),
             BotCommand(command="where", description="Показать chat_id и thread_id"),
+            BotCommand(command="version", description="Версия бота (диагностика)"),
             BotCommand(command="init_hours", description="Инициализировать тему Часы (админ)"),
         ])
     except Exception:
