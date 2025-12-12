@@ -28,6 +28,12 @@ jobs:
             set -e
             cd \"$WORKDIR\"
             git pull --rebase
+            echo '--- server repo ---'
+            pwd
+            git rev-parse --short HEAD
+            git log -1 --oneline
             docker compose up -d --build
+            echo '--- docker ---'
+            docker ps --format 'table {{.Names}}\t{{.Status}}' | head -n 20
           "
 
