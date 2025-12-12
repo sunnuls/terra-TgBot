@@ -1383,6 +1383,7 @@ class EditFSM(StatesGroup):
 
 class BrigFSM(StatesGroup):
     pick_date = State()
+    pick_hours = State()
     pick_shift = State()
     pick_mode = State()
     pick_crop = State()
@@ -3005,6 +3006,37 @@ def _brig_date_kb() -> InlineKeyboardMarkup:
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:root"))
     return kb.as_markup()
 
+def _brig_hours_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for h in range(1, 25):
+        kb.button(text=str(h), callback_data=f"brig:hours:{h}")
+    kb.adjust(6)
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:date"))
+    return kb.as_markup()
+
+def _brig_ob_crop_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Кабачок", callback_data="brig:crop:Кабачок")
+    kb.button(text="Картошка", callback_data="brig:crop:Картошка")
+    kb.button(text="🔙 Назад", callback_data="brig:back:hours")
+    kb.adjust(2, 1)
+    return kb.as_markup()
+
+def _format_brig_ob_summary(brig: dict) -> str:
+    crop = brig.get("crop") or "—"
+    bags = brig.get("bags")
+    show_bags = (crop or "").lower().startswith("карт")
+    return (
+        "📋 Подтвердите ОБ:\n"
+        f"Дата: {brig.get('work_date') or '—'}\n"
+        f"Часы: {brig.get('hours') or '—'}\n"
+        f"Культура: {crop}\n"
+        f"Рядов: {brig.get('rows') or '—'}\n"
+        f"Поле: {brig.get('field') or '—'}\n"
+        f"Людей: {brig.get('workers') if brig.get('workers') is not None else '—'}\n"
+        f"Мешков: {bags if show_bags else '—'}"
+    )
+
 @router.callback_query(F.data == "brig:report")
 async def cb_brig_report(c: CallbackQuery, state: FSMContext):
     if not (is_brigadier(c.from_user.id) or is_admin(c)):
@@ -3024,14 +3056,9 @@ async def cb_brig_date(c: CallbackQuery, state: FSMContext):
         return
     work_date = c.data.split(":")[2]
     await state.update_data(brig={"work_date": work_date})
-    await state.set_state(BrigFSM.pick_shift)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Утренняя", callback_data="brig:shift:morning")
-    kb.button(text="Вечерняя", callback_data="brig:shift:evening")
-    kb.button(text="🔙 Назад", callback_data="brig:back:date")
-    kb.adjust(2,1)
+    await state.set_state(BrigFSM.pick_hours)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        f"Дата: <b>{work_date}</b>\nВыберите смену:", reply_markup=kb.as_markup())
+                        f"Дата: <b>{work_date}</b>\nСколько часов?", reply_markup=_brig_hours_kb())
     await c.answer()
 
 @router.callback_query(F.data == "brig:back:date")
@@ -3040,6 +3067,37 @@ async def brig_back_date(c: CallbackQuery, state: FSMContext):
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                         "👷 Отчет бригадира\nВыберите дату:",
                         reply_markup=_brig_date_kb())
+    await c.answer()
+
+@router.callback_query(F.data == "brig:back:hours")
+async def brig_back_hours(c: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    brig = data.get("brig", {})
+    await state.set_state(BrigFSM.pick_hours)
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Дата: <b>{brig.get('work_date') or '—'}</b>\nСколько часов?",
+                        reply_markup=_brig_hours_kb())
+    await c.answer()
+
+@router.callback_query(F.data.startswith("brig:hours:"))
+async def cb_brig_hours(c: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    brig = data.get("brig", {})
+    if not brig:
+        await c.answer("Нет состояния", show_alert=True)
+        return
+    try:
+        hours = int(c.data.split(":")[2])
+    except Exception:
+        await c.answer("Неверное значение", show_alert=True)
+        return
+    brig["hours"] = hours
+    # маркер нового сценария ОБ
+    brig["ob_v2"] = True
+    await state.update_data(brig=brig)
+    await state.set_state(BrigFSM.pick_crop)
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Выберите культуру:", reply_markup=_brig_ob_crop_kb())
     await c.answer()
 
 @router.callback_query(F.data.startswith("brig:shift:"))
@@ -3533,19 +3591,20 @@ async def cb_brig_crop(c: CallbackQuery, state: FSMContext):
     if not brig:
         await c.answer("Нет состояния", show_alert=True)
         return
-    brig["mode"] = brig.get("mode") or "hand"
     crop = c.data.split(":", 2)[2]
-    if crop == "Прочее":
-        await state.update_data(brig=brig)
-        await state.set_state(BrigFSM.pick_crop_custom)
+    brig["crop"] = crop
+    await state.update_data(brig=brig)
+    # Новый сценарий ОБ: после культуры -> рядов
+    if brig.get("ob_v2") or brig.get("hours") is not None:
+        await state.set_state(BrigFSM.pick_rows)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                            "Введите культуру текстом:",
+                            "Сколько рядов?",
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:crop")]
                             ]))
     else:
-        brig["crop"] = crop
-        await state.update_data(brig=brig)
+        # Старый сценарий (на всякий случай оставляем)
+        brig["mode"] = brig.get("mode") or "hand"
         await state.set_state(BrigFSM.pick_workers)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                             "Сколько людей работало?",
@@ -3559,13 +3618,17 @@ async def brig_back_crop(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     brig = data.get("brig", {})
     await state.set_state(BrigFSM.pick_crop)
-    kb = InlineKeyboardBuilder()
-    for crop in ["Кабачок", "Картошка", "Подсолнечник", "Кукуруза", "Пшеница", "Горох", "Прочее"]:
-        kb.button(text=crop, callback_data=f"brig:crop:{crop}")
-    kb.button(text="🔙 Назад", callback_data="brig:back:activity")
-    kb.adjust(2,2)
-    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Выберите культуру:", reply_markup=kb.as_markup())
+    if brig.get("ob_v2") or brig.get("hours") is not None:
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            "Выберите культуру:", reply_markup=_brig_ob_crop_kb())
+    else:
+        kb = InlineKeyboardBuilder()
+        for crop in ["Кабачок", "Картошка", "Подсолнечник", "Кукуруза", "Пшеница", "Горох", "Прочее"]:
+            kb.button(text=crop, callback_data=f"brig:crop:{crop}")
+        kb.button(text="🔙 Назад", callback_data="brig:back:activity")
+        kb.adjust(2,2)
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            "Выберите культуру:", reply_markup=kb.as_markup())
     await c.answer()
 
 @router.message(BrigFSM.pick_crop_custom)
@@ -3652,18 +3715,39 @@ async def brig_pick_workers(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("Введите число людей",
                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:crop")]
+                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:field")]
                              ]))
         return
     data = await state.get_data()
     brig = data.get("brig", {})
     brig["workers"] = workers
     await state.update_data(brig=brig)
-    await state.set_state(BrigFSM.pick_rows)
-    await message.answer("Сколько рядов?",
-                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                             [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:workers")]
-                         ]))
+    # Новый сценарий ОБ: после людей -> мешков (если картошка) иначе подтверждение
+    if brig.get("ob_v2") or brig.get("hours") is not None:
+        crop = (brig.get("crop") or "").lower()
+        if crop.startswith("карт"):
+            await state.set_state(BrigFSM.pick_bags)
+            await message.answer("Сколько мешков?",
+                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                     [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:workers")]
+                                 ]))
+        else:
+            await state.set_state(BrigFSM.confirm)
+            brig["confirm_back"] = "workers_ob"
+            await state.update_data(brig=brig)
+            await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
+                                _format_brig_ob_summary(brig),
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                    [InlineKeyboardButton(text="✅ Сохранить", callback_data="brig:confirm:save")],
+                                    [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:confirm:back")],
+                                    [InlineKeyboardButton(text="❌ Отмена", callback_data="brig:confirm:cancel")],
+                                ]))
+    else:
+        await state.set_state(BrigFSM.pick_rows)
+        await message.answer("Сколько рядов?",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:workers")]
+                             ]))
 
 @router.callback_query(F.data == "brig:back:workers")
 async def brig_back_workers(c: CallbackQuery, state: FSMContext):
@@ -3682,26 +3766,34 @@ async def brig_pick_rows(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("Введите число рядов",
                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:workers")]
+                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:crop")]
                              ]))
         return
     data = await state.get_data()
     brig = data.get("brig", {})
     brig["rows"] = rows
     await state.update_data(brig=brig)
-    crop = (brig.get("crop") or "").lower()
-    if crop.startswith("карт"):
-        await state.set_state(BrigFSM.pick_bags)
-        await message.answer("Сколько мешков?",
+    # Новый сценарий ОБ: после рядов -> поле
+    if brig.get("ob_v2") or brig.get("hours") is not None:
+        await state.set_state(BrigFSM.pick_field)
+        await message.answer("Название поля:",
                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                  [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:rows")]
                              ]))
     else:
-        await state.set_state(BrigFSM.pick_field)
-        await message.answer("Укажите локацию (поле/место):",
-                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:rows")]
-                             ]))
+        crop = (brig.get("crop") or "").lower()
+        if crop.startswith("карт"):
+            await state.set_state(BrigFSM.pick_bags)
+            await message.answer("Сколько мешков?",
+                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                     [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:rows")]
+                                 ]))
+        else:
+            await state.set_state(BrigFSM.pick_field)
+            await message.answer("Укажите локацию (поле/место):",
+                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                     [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:rows")]
+                                 ]))
 
 @router.callback_query(F.data == "brig:back:rows")
 async def brig_back_rows(c: CallbackQuery, state: FSMContext):
@@ -3727,11 +3819,24 @@ async def brig_pick_bags(message: Message, state: FSMContext):
     brig = data.get("brig", {})
     brig["bags"] = bags
     await state.update_data(brig=brig)
-    await state.set_state(BrigFSM.pick_field)
-    await message.answer("Укажите локацию (поле/место):",
-                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                             [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:rows")]
-                         ]))
+    # Новый сценарий ОБ: после мешков -> подтверждение (люди уже должны быть)
+    if brig.get("ob_v2") or brig.get("hours") is not None:
+        await state.set_state(BrigFSM.confirm)
+        brig["confirm_back"] = "bags_ob"
+        await state.update_data(brig=brig)
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
+                            _format_brig_ob_summary(brig),
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="✅ Сохранить", callback_data="brig:confirm:save")],
+                                [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:confirm:back")],
+                                [InlineKeyboardButton(text="❌ Отмена", callback_data="brig:confirm:cancel")],
+                            ]))
+    else:
+        await state.set_state(BrigFSM.pick_field)
+        await message.answer("Укажите локацию (поле/место):",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:rows")]
+                             ]))
 
 @router.callback_query(F.data == "brig:back:bags")
 async def brig_back_bags(c: CallbackQuery, state: FSMContext):
@@ -3756,32 +3861,81 @@ async def brig_pick_field(message: Message, state: FSMContext):
     brig = data.get("brig", {})
     brig["field"] = field
     await state.update_data(brig=brig)
-    await state.set_state(BrigFSM.confirm)
-    brig["confirm_back"] = "field"
-    await state.update_data(brig=brig)
-    summary = (
-        f"📋 Подтвердите отчет:\n"
-        f"Дата: {brig.get('work_date')}\n"
-        f"Смена: {brig.get('shift')}\n"
-        f"Культура: {brig.get('crop')}\n"
-        f"Вид работы: {brig.get('activity')}\n"
-        f"Людей: {brig.get('workers')}\n"
-        f"Рядов: {brig.get('rows')}\n"
-        f"Мешков: {brig.get('bags') if (brig.get('crop') or '').lower().startswith('карт') else '—'}\n"
-        f"Локация: {brig.get('field')}"
-    )
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Сохранить", callback_data="brig:confirm:save")
-    kb.button(text="🔙 Назад", callback_data="brig:confirm:back")
-    kb.button(text="❌ Отмена", callback_data="brig:confirm:cancel")
-    kb.adjust(2,1)
-    await message.answer(summary, reply_markup=kb.as_markup())
+    # Новый сценарий ОБ: после поля -> люди
+    if brig.get("ob_v2") or brig.get("hours") is not None:
+        await state.set_state(BrigFSM.pick_workers)
+        await message.answer("Сколько людей работало?",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:field")]
+                             ]))
+    else:
+        await state.set_state(BrigFSM.confirm)
+        brig["confirm_back"] = "field"
+        await state.update_data(brig=brig)
+        summary = (
+            f"📋 Подтвердите отчет:\n"
+            f"Дата: {brig.get('work_date')}\n"
+            f"Смена: {brig.get('shift')}\n"
+            f"Культура: {brig.get('crop')}\n"
+            f"Вид работы: {brig.get('activity')}\n"
+            f"Людей: {brig.get('workers')}\n"
+            f"Рядов: {brig.get('rows')}\n"
+            f"Мешков: {brig.get('bags') if (brig.get('crop') or '').lower().startswith('карт') else '—'}\n"
+            f"Локация: {brig.get('field')}"
+        )
+        kb = InlineKeyboardBuilder()
+        kb.button(text="✅ Сохранить", callback_data="brig:confirm:save")
+        kb.button(text="🔙 Назад", callback_data="brig:confirm:back")
+        kb.button(text="❌ Отмена", callback_data="brig:confirm:cancel")
+        kb.adjust(2,1)
+        await message.answer(summary, reply_markup=kb.as_markup())
+
+@router.callback_query(F.data == "brig:back:field")
+async def brig_back_field(c: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    brig = data.get("brig", {})
+    await state.set_state(BrigFSM.pick_field)
+    prompt = "Название поля:" if (brig.get("ob_v2") or brig.get("hours") is not None) else "Укажите локацию (поле/место):"
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        prompt,
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:rows")]
+                        ]))
+    await c.answer()
 
 @router.callback_query(F.data == "brig:confirm:back")
 async def brig_confirm_back(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     brig = data.get("brig", {})
     target = brig.get("confirm_back") or "field"
+    # Новый сценарий ОБ (v2)
+    if brig.get("ob_v2") or brig.get("hours") is not None:
+        if target in ("bags_ob", "workers_ob"):
+            crop = (brig.get("crop") or "").lower()
+            if target == "bags_ob" or crop.startswith("карт"):
+                await state.set_state(BrigFSM.pick_bags)
+                await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                                    "Сколько мешков?",
+                                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                        [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:workers")]
+                                    ]))
+            else:
+                await state.set_state(BrigFSM.pick_workers)
+                await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                                    "Сколько людей работало?",
+                                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                        [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:field")]
+                                    ]))
+        else:
+            # по умолчанию назад к людям
+            await state.set_state(BrigFSM.pick_workers)
+            await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                                "Сколько людей работало?",
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                    [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:field")]
+                                ]))
+        await c.answer()
+        return
     if target == "tech_crop":
         await state.set_state(BrigFSM.pick_machine_crop)
         kb = InlineKeyboardBuilder()
@@ -3818,6 +3972,34 @@ async def brig_confirm_save(c: CallbackQuery, state: FSMContext):
     brig = data.get("brig", {})
     if not brig:
         await c.answer("Нет данных", show_alert=True)
+        return
+    # Новый сценарий ОБ (v2)
+    if brig.get("ob_v2") or brig.get("hours") is not None:
+        u = get_user(c.from_user.id) or {}
+        username = (u.get("username") or c.from_user.username or "")
+        work_type = brig.get("crop") or "—"
+        field = brig.get("field") or "—"
+        shift = f"{int(brig.get('hours') or 0)} ч"
+        rows = int(brig.get("rows") or 0)
+        workers = int(brig.get("workers") or 0)
+        bags = int(brig.get("bags") or 0) if (work_type or "").lower().startswith("карт") else 0
+        work_date = brig.get("work_date") or date.today().isoformat()
+        insert_brig_report(
+            user_id=c.from_user.id,
+            username=username,
+            work_type=work_type,
+            field=field,
+            shift=shift,
+            rows=rows,
+            bags=bags,
+            workers=workers,
+            work_date=work_date,
+        )
+        await state.clear()
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            "✅ ОБ сохранено",
+                            reply_markup=main_menu_kb(get_role_label(c.from_user.id)))
+        await c.answer("Сохранено")
         return
     mode = brig.get("mode") or "hand"
     if mode == "tech":
