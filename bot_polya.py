@@ -3147,7 +3147,6 @@ def _format_brig_ob_summary(brig: dict) -> str:
     return (
         "📋 Подтвердите ОБ:\n"
         f"Дата: {brig.get('work_date') or '—'}\n"
-        f"Часы: {brig.get('hours') if brig.get('hours') is not None else '—'}\n"
         f"Культура: {crop if crop is not None else '—'}\n"
         f"Рядов: {brig.get('rows') if brig.get('rows') is not None else '—'}\n"
         f"Поле: {brig.get('field') or '—'}\n"
@@ -3190,10 +3189,11 @@ async def cb_brig_date(c: CallbackQuery, state: FSMContext):
         await c.answer("Нет прав", show_alert=True)
         return
     work_date = c.data.split(":")[2]
-    await state.update_data(brig={"work_date": work_date})
-    await state.set_state(BrigFSM.pick_hours)
+    # ОБ: без ввода часов (по требованию)
+    await state.update_data(brig={"work_date": work_date, "ob_v2": True, "hours": None})
+    await state.set_state(BrigFSM.pick_crop)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        f"Дата: <b>{work_date}</b>\nСколько часов?", reply_markup=_brig_hours_kb())
+                        f"Дата: <b>{work_date}</b>\nВыберите культуру:", reply_markup=_brig_ob_crop_kb())
     await c.answer()
 
 @router.callback_query(F.data == "brig:back:date")
@@ -4183,7 +4183,7 @@ async def brig_confirm_save(c: CallbackQuery, state: FSMContext):
         username = (u.get("username") or c.from_user.username or "")
         work_type = brig.get("crop") or "—"
         field = brig.get("field") or "—"
-        shift = f"{int(brig.get('hours'))} ч" if brig.get("hours") is not None else "—"
+        shift = "—"
         rows = brig.get("rows")
         workers = brig.get("workers")
         bags = brig.get("bags")
