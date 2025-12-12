@@ -7,6 +7,8 @@ services:
     restart: always
     env_file:
       - .env
+    environment:
+      - GIT_SHA=${GIT_SHA:-unknown}
     volumes:
       # Сохранение базы данных между перезапусками
       - ./reports.db:/app/reports.db

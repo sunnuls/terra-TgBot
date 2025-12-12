@@ -30,7 +30,8 @@ jobs:
             git pull --rebase
             echo '--- server repo ---'
             pwd
-            git rev-parse --short HEAD
+            export GIT_SHA=$(git rev-parse --short HEAD)
+            echo \"GIT_SHA=$GIT_SHA\"
             git log -1 --oneline
             docker compose up -d --build
             echo '--- docker ---'
