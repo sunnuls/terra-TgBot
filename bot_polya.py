@@ -1646,9 +1646,10 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
 
     if role == "brigadier":
         kb.button(text="ОБ", callback_data="brig:report")
+        kb.button(text="ОТД", callback_data="otd:start")
         kb.button(text="Статистика", callback_data="brig:stats")
         kb.button(text="Настройки", callback_data="menu:name")
-        kb.adjust(1, 2)
+        kb.adjust(2, 2)
         return kb.as_markup()
 
     if role == "admin":
