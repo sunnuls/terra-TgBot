@@ -445,6 +445,40 @@ def init_db():
         )
         """)
 
+        # справочники техники (типы техники + список конкретной техники)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS machine_kinds(
+          id    INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT UNIQUE,
+          mode  TEXT
+        )
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS machine_items(
+          id       INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind_id  INTEGER,
+          name     TEXT,
+          UNIQUE(kind_id, name)
+        )
+        """)
+
+        # миграция machine_kinds.mode (если старая схема)
+        mkcols = table_cols("machine_kinds")
+        if "mode" not in mkcols:
+            c.execute("ALTER TABLE machine_kinds ADD COLUMN mode TEXT")
+            c.execute("UPDATE machine_kinds SET mode='list' WHERE (mode IS NULL OR mode='')")
+
+        # дефолтные типы техники
+        # mode: 'list' -> выбирать/вводить конкретную технику, 'single' -> техника без выбора имени
+        c.execute("INSERT OR IGNORE INTO machine_kinds(id, title, mode) VALUES (1, 'Трактор', 'list')")
+        c.execute("INSERT OR IGNORE INTO machine_kinds(id, title, mode) VALUES (2, 'КамАЗ', 'single')")
+
+        # дефолтный список тракторов (если ещё не добавлены)
+        for tname in OTD_TRACTORS:
+            if (tname or "").strip().lower() == "прочее":
+                continue
+            c.execute("INSERT OR IGNORE INTO machine_items(kind_id, name) VALUES (1, ?)", (tname,))
+
         # locations
         lcols = table_cols("locations")
         if "grp" not in lcols:
@@ -584,6 +618,76 @@ def remove_brigadier(user_id: int) -> bool:
         con.commit()
         return cur.rowcount > 0
 
+# -----------------------------
+# Списки пользователей/бригадиров (для админских клавиатур)
+# -----------------------------
+
+def _display_user(full_name: Optional[str], username: Optional[str], user_id: int) -> str:
+    fn = (full_name or "").strip()
+    un = (username or "").strip().lstrip("@")
+    if fn and un:
+        return f"{fn} (@{un})"
+    if fn:
+        return fn
+    if un:
+        return f"@{un}"
+    return str(user_id)
+
+def count_registered_users() -> int:
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute("SELECT COUNT(*) FROM users WHERE full_name IS NOT NULL AND TRIM(full_name)<>''").fetchone()
+        return int(r[0] or 0)
+
+def list_registered_users(limit: int, offset: int = 0) -> List[dict]:
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute(
+            """
+            SELECT user_id, full_name, username
+            FROM users
+            WHERE full_name IS NOT NULL AND TRIM(full_name)<>''
+            ORDER BY LOWER(full_name) ASC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        return [{"user_id": r[0], "full_name": r[1], "username": r[2]} for r in rows]
+
+def count_brigadiers_known() -> int:
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute(
+            """
+            SELECT COUNT(*) FROM (
+              SELECT user_id FROM user_roles WHERE role='brigadier'
+              UNION
+              SELECT user_id FROM brigadiers
+            )
+            """
+        ).fetchone()
+        return int(r[0] or 0)
+
+def list_brigadiers_known(limit: int, offset: int = 0) -> List[dict]:
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute(
+            """
+            SELECT t.user_id,
+                   COALESCE(u.full_name, t.full_name) AS full_name,
+                   COALESCE(u.username,  t.username)  AS username
+            FROM (
+              SELECT ur.user_id AS user_id, NULL AS full_name, NULL AS username
+              FROM user_roles ur
+              WHERE ur.role='brigadier'
+              UNION
+              SELECT b.user_id AS user_id, b.full_name AS full_name, b.username AS username
+              FROM brigadiers b
+            ) t
+            LEFT JOIN users u ON u.user_id=t.user_id
+            ORDER BY LOWER(COALESCE(u.full_name, t.full_name, '')) ASC, t.user_id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        return [{"user_id": r[0], "full_name": r[1], "username": r[2]} for r in rows]
+
 def is_admin(message_or_query) -> bool:
     uid = message_or_query.from_user.id
     uname = _norm_username(message_or_query.from_user.username, uid)
@@ -678,14 +782,231 @@ def remove_activity(name: str) -> bool:
         return cur.rowcount > 0
 
 def list_locations(grp: str) -> List[str]:
-    # Жестко фиксируем порядок и состав локаций по требованию (поля/склад).
-    if grp == GROUP_FIELDS:
-        return list(FIELD_LOCATIONS)
-    if grp == GROUP_WARE:
-        return ["Склад"]
     with connect() as con, closing(con.cursor()) as c:
         rows = c.execute("SELECT name FROM locations WHERE grp=? ORDER BY name", (grp,)).fetchall()
         return [r[0] for r in rows]
+
+def list_locations_rows(*, grp: Optional[str] = None, limit: int = 50, offset: int = 0) -> List[dict]:
+    with connect() as con, closing(con.cursor()) as c:
+        if grp:
+            rows = c.execute(
+                "SELECT id, name, grp FROM locations WHERE grp=? ORDER BY name LIMIT ? OFFSET ?",
+                (grp, limit, offset),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT id, name, grp FROM locations ORDER BY grp, name LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        return [{"id": r[0], "name": r[1], "grp": r[2]} for r in rows]
+
+def count_locations(*, grp: Optional[str] = None) -> int:
+    with connect() as con, closing(con.cursor()) as c:
+        if grp:
+            r = c.execute("SELECT COUNT(*) FROM locations WHERE grp=?", (grp,)).fetchone()
+        else:
+            r = c.execute("SELECT COUNT(*) FROM locations").fetchone()
+        return int(r[0] or 0)
+
+def get_location_by_id(loc_id: int) -> Optional[dict]:
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute("SELECT id, name, grp FROM locations WHERE id=?", (loc_id,)).fetchone()
+        if not r:
+            return None
+        return {"id": r[0], "name": r[1], "grp": r[2]}
+
+def update_location_name(loc_id: int, new_name: str) -> bool:
+    new_name = (new_name or "").strip()
+    if not new_name:
+        return False
+    with connect() as con, closing(con.cursor()) as c:
+        try:
+            cur = c.execute("UPDATE locations SET name=? WHERE id=?", (new_name, loc_id))
+            con.commit()
+            return cur.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+
+def delete_location_by_id(loc_id: int) -> bool:
+    with connect() as con, closing(con.cursor()) as c:
+        cur = c.execute("DELETE FROM locations WHERE id=?", (loc_id,))
+        con.commit()
+        return cur.rowcount > 0
+
+def list_activities_rows(*, grp: str, limit: int = 50, offset: int = 0) -> List[dict]:
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute(
+            "SELECT id, name, grp FROM activities WHERE grp=? ORDER BY name LIMIT ? OFFSET ?",
+            (grp, limit, offset),
+        ).fetchall()
+        return [{"id": r[0], "name": r[1], "grp": r[2]} for r in rows]
+
+def count_activities(grp: str) -> int:
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute("SELECT COUNT(*) FROM activities WHERE grp=?", (grp,)).fetchone()
+        return int(r[0] or 0)
+
+def get_activity_by_id(act_id: int) -> Optional[dict]:
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute("SELECT id, name, grp FROM activities WHERE id=?", (act_id,)).fetchone()
+        if not r:
+            return None
+        return {"id": r[0], "name": r[1], "grp": r[2]}
+
+def update_activity_name(act_id: int, new_name: str) -> bool:
+    new_name = (new_name or "").strip()
+    if not new_name:
+        return False
+    with connect() as con, closing(con.cursor()) as c:
+        try:
+            cur = c.execute("UPDATE activities SET name=? WHERE id=?", (new_name, act_id))
+            con.commit()
+            return cur.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+
+def delete_activity_by_id(act_id: int) -> bool:
+    with connect() as con, closing(con.cursor()) as c:
+        cur = c.execute("DELETE FROM activities WHERE id=?", (act_id,))
+        con.commit()
+        return cur.rowcount > 0
+
+def list_crops_rows(limit: int = 50, offset: int = 0) -> List[dict]:
+    with connect() as con, closing(con.cursor()) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY)")
+        rows = c.execute("SELECT rowid, name FROM crops ORDER BY name LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+        return [{"id": r[0], "name": r[1]} for r in rows]
+
+def count_crops() -> int:
+    with connect() as con, closing(con.cursor()) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY)")
+        r = c.execute("SELECT COUNT(*) FROM crops").fetchone()
+        return int(r[0] or 0)
+
+def get_crop_by_rowid(crop_rowid: int) -> Optional[dict]:
+    with connect() as con, closing(con.cursor()) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY)")
+        r = c.execute("SELECT rowid, name FROM crops WHERE rowid=?", (crop_rowid,)).fetchone()
+        if not r:
+            return None
+        return {"id": r[0], "name": r[1]}
+
+def update_crop_name(crop_rowid: int, new_name: str) -> bool:
+    new_name = (new_name or "").strip()
+    if not new_name:
+        return False
+    with connect() as con, closing(con.cursor()) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY)")
+        try:
+            cur = c.execute("UPDATE crops SET name=? WHERE rowid=?", (new_name, crop_rowid))
+            con.commit()
+            return cur.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+
+def delete_crop_by_rowid(crop_rowid: int) -> bool:
+    with connect() as con, closing(con.cursor()) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY)")
+        cur = c.execute("DELETE FROM crops WHERE rowid=?", (crop_rowid,))
+        con.commit()
+        return cur.rowcount > 0
+
+# -----------------------------
+# Техника (типы техники + список конкретной техники)
+# -----------------------------
+
+def list_machine_kinds(limit: int = 50, offset: int = 0) -> List[dict]:
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute(
+            "SELECT id, title, mode FROM machine_kinds ORDER BY id ASC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        return [{"id": r[0], "title": r[1], "mode": r[2] or "list"} for r in rows]
+
+def count_machine_kinds() -> int:
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute("SELECT COUNT(*) FROM machine_kinds").fetchone()
+        return int(r[0] or 0)
+
+def get_machine_kind(kind_id: int) -> Optional[dict]:
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute("SELECT id, title, mode FROM machine_kinds WHERE id=?", (kind_id,)).fetchone()
+        if not r:
+            return None
+        return {"id": r[0], "title": r[1], "mode": r[2] or "list"}
+
+def add_machine_kind(title: str, mode: str = "list") -> bool:
+    title = (title or "").strip()
+    if not title:
+        return False
+    mode = (mode or "list").strip().lower()
+    if mode not in ("list", "single"):
+        mode = "list"
+    with connect() as con, closing(con.cursor()) as c:
+        try:
+            c.execute("INSERT INTO machine_kinds(title, mode) VALUES(?,?)", (title, mode))
+            con.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+def delete_machine_kind(kind_id: int) -> bool:
+    with connect() as con, closing(con.cursor()) as c:
+        # удаляем связанные элементы
+        c.execute("DELETE FROM machine_items WHERE kind_id=?", (kind_id,))
+        cur = c.execute("DELETE FROM machine_kinds WHERE id=?", (kind_id,))
+        con.commit()
+        return cur.rowcount > 0
+
+def list_machine_items(kind_id: int, limit: int = 50, offset: int = 0) -> List[dict]:
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute(
+            "SELECT id, kind_id, name FROM machine_items WHERE kind_id=? ORDER BY name LIMIT ? OFFSET ?",
+            (kind_id, limit, offset),
+        ).fetchall()
+        return [{"id": r[0], "kind_id": r[1], "name": r[2]} for r in rows]
+
+def count_machine_items(kind_id: int) -> int:
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute("SELECT COUNT(*) FROM machine_items WHERE kind_id=?", (kind_id,)).fetchone()
+        return int(r[0] or 0)
+
+def get_machine_item(item_id: int) -> Optional[dict]:
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute("SELECT id, kind_id, name FROM machine_items WHERE id=?", (item_id,)).fetchone()
+        if not r:
+            return None
+        return {"id": r[0], "kind_id": r[1], "name": r[2]}
+
+def add_machine_item(kind_id: int, name: str) -> bool:
+    name = (name or "").strip()
+    if not name:
+        return False
+    with connect() as con, closing(con.cursor()) as c:
+        try:
+            c.execute("INSERT INTO machine_items(kind_id, name) VALUES(?,?)", (kind_id, name))
+            con.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+def update_machine_item(item_id: int, new_name: str) -> bool:
+    new_name = (new_name or "").strip()
+    if not new_name:
+        return False
+    with connect() as con, closing(con.cursor()) as c:
+        try:
+            cur = c.execute("UPDATE machine_items SET name=? WHERE id=?", (new_name, item_id))
+            con.commit()
+            return cur.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+
+def delete_machine_item(item_id: int) -> bool:
+    with connect() as con, closing(con.cursor()) as c:
+        cur = c.execute("DELETE FROM machine_items WHERE id=?", (item_id,))
+        con.commit()
+        return cur.rowcount > 0
 
 def add_location(grp: str, name: str) -> bool:
     name = name.strip()
@@ -1392,6 +1713,7 @@ class OtdFSM(StatesGroup):
     pick_type = State()
     pick_machine_type = State()
     pick_machine = State()
+    pick_machine_custom = State()
     pick_activity = State()
     pick_location = State()
     pick_crop = State()
@@ -1405,6 +1727,8 @@ class AdminFSM(StatesGroup):
     del_pick = State()
     add_brig_id = State()
     del_brig_id = State()
+    edit_name = State()
+    edit_confirm = State()
 
 class EditFSM(StatesGroup):
     waiting_field_numbers = State()
@@ -1847,16 +2171,19 @@ def otd_type_keyboard() -> InlineKeyboardMarkup:
 
 def otd_machine_type_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="Трактор", callback_data="otd:mkind:tractor")
-    kb.button(text="КамАЗ", callback_data="otd:mkind:kamaz")
+    kinds = list_machine_kinds(limit=50, offset=0)
+    for k in kinds:
+        kb.button(text=(k.get("title") or "—")[:64], callback_data=f"otd:mkind:{k['id']}")
     kb.adjust(2)
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:type"))
     return kb.as_markup()
 
-def otd_tractor_kb() -> InlineKeyboardMarkup:
+def otd_machine_name_kb(kind_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for name in OTD_TRACTORS:
-        kb.button(text=name, callback_data=f"otd:tractor:{name}")
+    items = list_machine_items(kind_id, limit=50, offset=0)
+    for it in items:
+        kb.button(text=(it.get("name") or "—")[:64], callback_data=f"otd:mname:{it['id']}")
+    kb.button(text="Прочее", callback_data=f"otd:mname:__other__:{kind_id}")
     kb.adjust(2)
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:mkind"))
     return kb.as_markup()
@@ -1949,44 +2276,241 @@ def admin_root_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 def admin_root_loc_kb() -> InlineKeyboardMarkup:
+    # legacy (оставлено для совместимости)
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Добавить", callback_data="adm:add:loc")
-    kb.button(text="➖ Удалить", callback_data="adm:del:loc")
+    kb.button(text="↩️ К списку", callback_data="adm:root:loc")
+    kb.button(text="🔙 Назад", callback_data="adm:root")
+    kb.adjust(1,1)
+    return kb.as_markup()
+
+def admin_root_act_kb() -> InlineKeyboardMarkup:
+    # legacy (оставлено для совместимости)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="↩️ К выбору типа", callback_data="adm:root:act")
+    kb.button(text="🔙 Назад", callback_data="adm:root")
+    kb.adjust(1,1)
+    return kb.as_markup()
+
+def admin_root_loc_list_kb(page: int = 0, page_size: int = 12) -> InlineKeyboardMarkup:
+    total = count_locations()
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, pages - 1))
+    offset = page * page_size
+    items = list_locations_rows(limit=page_size, offset=offset)
+
+    kb = InlineKeyboardBuilder()
+    for it in items:
+        grp = it.get("grp") or ""
+        grp_lbl = "поля" if grp == GROUP_FIELDS else ("склад" if grp == GROUP_WARE else grp)
+        kb.button(text=f"{it['name']} ({grp_lbl})"[:64], callback_data=f"adm:root:loc:item:{it['id']}")
+    kb.adjust(1)
+
+    if pages > 1:
+        nav = InlineKeyboardBuilder()
+        if page > 0:
+            nav.button(text="⬅️", callback_data=f"adm:root:loc:page:{page-1}")
+        nav.button(text=f"{page+1}/{pages}", callback_data="adm:root:loc")
+        if page < pages - 1:
+            nav.button(text="➡️", callback_data=f"adm:root:loc:page:{page+1}")
+        nav.adjust(3)
+        kb.attach(nav)
+
+    kb.row(InlineKeyboardButton(text="➕ Добавить", callback_data="adm:root:loc:add"))
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:root"))
+    return kb.as_markup()
+
+def admin_root_loc_item_kb(loc_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✏️ Изменить", callback_data=f"adm:root:loc:edit:{loc_id}")
+    kb.button(text="🗑 Удалить", callback_data=f"adm:root:loc:del:{loc_id}")
+    kb.button(text="🔙 Назад", callback_data="adm:root:loc")
+    kb.button(text="⬅️ В корень", callback_data="adm:root")
+    kb.adjust(2,2)
+    return kb.as_markup()
+
+def admin_root_loc_add_grp_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Поля", callback_data="adm:root:loc:addgrp:fields")
+    kb.button(text="Склад", callback_data="adm:root:loc:addgrp:ware")
+    kb.button(text="🔙 Назад", callback_data="adm:root:loc")
+    kb.adjust(2,1)
+    return kb.as_markup()
+
+def admin_root_act_pick_grp_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Техника", callback_data="adm:root:act:grp:tech")
+    kb.button(text="Ручная", callback_data="adm:root:act:grp:hand")
     kb.button(text="🔙 Назад", callback_data="adm:root")
     kb.adjust(2,1)
     return kb.as_markup()
 
-def admin_root_act_kb() -> InlineKeyboardMarkup:
+def admin_root_act_list_kb(grp: str, page: int = 0, page_size: int = 12) -> InlineKeyboardMarkup:
+    grp_name = GROUP_TECH if grp == "tech" else GROUP_HAND
+    total = count_activities(grp_name)
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, pages - 1))
+    offset = page * page_size
+    items = list_activities_rows(grp=grp_name, limit=page_size, offset=offset)
+
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Добавить", callback_data="adm:add:act")
-    kb.button(text="➖ Удалить", callback_data="adm:del:act")
-    kb.button(text="🔙 Назад", callback_data="adm:root")
-    kb.adjust(2,1)
+    for it in items:
+        kb.button(text=it["name"][:64], callback_data=f"adm:root:act:item:{grp}:{it['id']}")
+    kb.adjust(1)
+
+    if pages > 1:
+        nav = InlineKeyboardBuilder()
+        if page > 0:
+            nav.button(text="⬅️", callback_data=f"adm:root:act:page:{grp}:{page-1}")
+        nav.button(text=f"{page+1}/{pages}", callback_data=f"adm:root:act:grp:{grp}")
+        if page < pages - 1:
+            nav.button(text="➡️", callback_data=f"adm:root:act:page:{grp}:{page+1}")
+        nav.adjust(3)
+        kb.attach(nav)
+
+    kb.row(InlineKeyboardButton(text="➕ Добавить", callback_data=f"adm:root:act:add:{grp}"))
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:root:act"))
+    kb.row(InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root"))
+    return kb.as_markup()
+
+def admin_root_act_item_kb(grp: str, act_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✏️ Изменить", callback_data=f"adm:root:act:edit:{grp}:{act_id}")
+    kb.button(text="🗑 Удалить", callback_data=f"adm:root:act:del:{grp}:{act_id}")
+    kb.button(text="🔙 Назад", callback_data=f"adm:root:act:grp:{grp}")
+    kb.button(text="⬅️ В корень", callback_data="adm:root")
+    kb.adjust(2,2)
     return kb.as_markup()
 
 def admin_root_tech_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Трактор", callback_data="adm:root:tech:tractor")
     kb.button(text="КамАЗ", callback_data="adm:root:tech:kamaz")
+    kb.button(text="➕ Добавить тип", callback_data="adm:root:techkind:add")
+    kb.button(text="🗑 Удалить тип", callback_data="adm:root:techkind:del")
     kb.button(text="🔙 Назад", callback_data="adm:root")
-    kb.adjust(2,1)
+    kb.adjust(2,2,1)
     return kb.as_markup()
 
 def admin_root_tech_actions_kb(sub: str) -> InlineKeyboardMarkup:
+    # legacy (оставлено для совместимости)
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Добавить", callback_data=f"adm:root:tech:add:{sub}")
-    kb.button(text="➖ Удалить", callback_data=f"adm:root:tech:del:{sub}")
+    kb.button(text="↩️ К технике", callback_data="adm:root:tech")
+    kb.button(text="⬅️ В корень", callback_data="adm:root")
+    kb.adjust(1,1)
+    return kb.as_markup()
+
+def admin_root_tech_items_kb(kind_id: int, page: int = 0, page_size: int = 12) -> InlineKeyboardMarkup:
+    mk = get_machine_kind(kind_id) or {"title": "—"}
+    total = count_machine_items(kind_id)
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, pages - 1))
+    offset = page * page_size
+    items = list_machine_items(kind_id, limit=page_size, offset=offset)
+
+    kb = InlineKeyboardBuilder()
+    for it in items:
+        kb.button(text=(it.get("name") or "—")[:64], callback_data=f"adm:root:tech:item:{kind_id}:{it['id']}")
+    kb.adjust(1)
+
+    if pages > 1:
+        nav = InlineKeyboardBuilder()
+        if page > 0:
+            nav.button(text="⬅️", callback_data=f"adm:root:tech:page:{kind_id}:{page-1}")
+        nav.button(text=f"{page+1}/{pages}", callback_data=f"adm:root:tech:tractor")
+        if page < pages - 1:
+            nav.button(text="➡️", callback_data=f"adm:root:tech:page:{kind_id}:{page+1}")
+        nav.adjust(3)
+        kb.attach(nav)
+
+    kb.row(InlineKeyboardButton(text="➕ Добавить", callback_data=f"adm:root:tech:add:{kind_id}"))
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:root:tech"))
+    kb.row(InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root"))
+    return kb.as_markup()
+
+def admin_root_tech_item_kb(kind_id: int, item_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✏️ Изменить", callback_data=f"adm:root:tech:edit:{kind_id}:{item_id}")
+    kb.button(text="🗑 Удалить", callback_data=f"adm:root:tech:del:{kind_id}:{item_id}")
+    kb.button(text="🔙 Назад", callback_data=f"adm:root:tech:tractor")
+    kb.button(text="⬅️ В корень", callback_data="adm:root")
+    kb.adjust(2,2)
+    return kb.as_markup()
+
+def admin_root_tech_kamaz_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Удалить КамАЗ", callback_data="adm:root:techkind:delpick:2")
     kb.button(text="🔙 Назад", callback_data="adm:root:tech")
     kb.button(text="⬅️ В корень", callback_data="adm:root")
-    kb.adjust(2,1,1)
+    kb.adjust(1,1,1)
+    return kb.as_markup()
+
+def admin_root_tech_kind_del_kb(page: int = 0, page_size: int = 12) -> InlineKeyboardMarkup:
+    total = count_machine_kinds()
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, pages - 1))
+    offset = page * page_size
+    kinds = list_machine_kinds(limit=page_size, offset=offset)
+
+    kb = InlineKeyboardBuilder()
+    for k in kinds:
+        kb.button(text=f"🗑 {k['title']}"[:64], callback_data=f"adm:root:techkind:delpick:{k['id']}")
+    kb.adjust(1)
+
+    if pages > 1:
+        nav = InlineKeyboardBuilder()
+        if page > 0:
+            nav.button(text="⬅️", callback_data=f"adm:root:techkind:page:{page-1}")
+        nav.button(text=f"{page+1}/{pages}", callback_data="adm:root:techkind:del")
+        if page < pages - 1:
+            nav.button(text="➡️", callback_data=f"adm:root:techkind:page:{page+1}")
+        nav.adjust(3)
+        kb.attach(nav)
+
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:root:tech"))
+    kb.row(InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root"))
     return kb.as_markup()
 
 def admin_root_crop_kb() -> InlineKeyboardMarkup:
+    # legacy (оставлено для совместимости)
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Добавить", callback_data="adm:root:crop:add")
-    kb.button(text="➖ Удалить", callback_data="adm:root:crop:del")
+    kb.button(text="↩️ К списку", callback_data="adm:root:crop")
     kb.button(text="🔙 Назад", callback_data="adm:root")
-    kb.adjust(2,1)
+    kb.adjust(1,1)
+    return kb.as_markup()
+
+def admin_root_crop_list_kb(page: int = 0, page_size: int = 12) -> InlineKeyboardMarkup:
+    total = count_crops()
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, pages - 1))
+    offset = page * page_size
+    items = list_crops_rows(page_size, offset)
+
+    kb = InlineKeyboardBuilder()
+    for it in items:
+        kb.button(text=it["name"][:64], callback_data=f"adm:root:crop:item:{it['id']}")
+    kb.adjust(1)
+
+    if pages > 1:
+        nav = InlineKeyboardBuilder()
+        if page > 0:
+            nav.button(text="⬅️", callback_data=f"adm:root:crop:page:{page-1}")
+        nav.button(text=f"{page+1}/{pages}", callback_data="adm:root:crop")
+        if page < pages - 1:
+            nav.button(text="➡️", callback_data=f"adm:root:crop:page:{page+1}")
+        nav.adjust(3)
+        kb.attach(nav)
+
+    kb.row(InlineKeyboardButton(text="➕ Добавить", callback_data="adm:root:crop:add"))
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:root"))
+    return kb.as_markup()
+
+def admin_root_crop_item_kb(crop_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✏️ Изменить", callback_data=f"adm:root:crop:edit:{crop_id}")
+    kb.button(text="🗑 Удалить", callback_data=f"adm:root:crop:delid:{crop_id}")
+    kb.button(text="🔙 Назад", callback_data="adm:root:crop")
+    kb.button(text="⬅️ В корень", callback_data="adm:root")
+    kb.adjust(2,2)
     return kb.as_markup()
 
 def admin_roles_kb() -> InlineKeyboardMarkup:
@@ -1995,6 +2519,70 @@ def admin_roles_kb() -> InlineKeyboardMarkup:
     kb.button(text="➖ Снять бригадира", callback_data="adm:role:del:brig")
     kb.button(text="🔙 Назад", callback_data="menu:admin")
     kb.adjust(2,1)
+    return kb.as_markup()
+
+def admin_role_add_brig_kb(page: int = 0, page_size: int = 12) -> InlineKeyboardMarkup:
+    total = count_registered_users()
+    kb = InlineKeyboardBuilder()
+    if total <= 0:
+        kb.button(text="— нет зарегистрированных —", callback_data="adm:roles")
+        kb.button(text="🔙 Назад", callback_data="adm:roles")
+        kb.adjust(1,1)
+        return kb.as_markup()
+
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, pages - 1))
+    offset = page * page_size
+    users = list_registered_users(page_size, offset)
+
+    for u in users:
+        label = _display_user(u.get("full_name"), u.get("username"), u["user_id"])
+        kb.button(text=label[:64], callback_data=f"adm:role:add:brig:pick:{u['user_id']}")
+    kb.adjust(1)
+
+    if pages > 1:
+        nav = InlineKeyboardBuilder()
+        if page > 0:
+            nav.button(text="⬅️", callback_data=f"adm:role:add:brig:page:{page-1}")
+        nav.button(text=f"{page+1}/{pages}", callback_data="adm:roles")
+        if page < pages - 1:
+            nav.button(text="➡️", callback_data=f"adm:role:add:brig:page:{page+1}")
+        nav.adjust(3)
+        kb.attach(nav)
+
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:roles"))
+    return kb.as_markup()
+
+def admin_role_del_brig_kb(page: int = 0, page_size: int = 12) -> InlineKeyboardMarkup:
+    total = count_brigadiers_known()
+    kb = InlineKeyboardBuilder()
+    if total <= 0:
+        kb.button(text="— бригадиров нет —", callback_data="adm:roles")
+        kb.button(text="🔙 Назад", callback_data="adm:roles")
+        kb.adjust(1,1)
+        return kb.as_markup()
+
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, pages - 1))
+    offset = page * page_size
+    brig = list_brigadiers_known(page_size, offset)
+
+    for b in brig:
+        label = _display_user(b.get("full_name"), b.get("username"), b["user_id"])
+        kb.button(text=label[:64], callback_data=f"adm:role:del:brig:pick:{b['user_id']}")
+    kb.adjust(1)
+
+    if pages > 1:
+        nav = InlineKeyboardBuilder()
+        if page > 0:
+            nav.button(text="⬅️", callback_data=f"adm:role:del:brig:page:{page-1}")
+        nav.button(text=f"{page+1}/{pages}", callback_data="adm:roles")
+        if page < pages - 1:
+            nav.button(text="➡️", callback_data=f"adm:role:del:brig:page:{page+1}")
+        nav.adjust(3)
+        kb.attach(nav)
+
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:roles"))
     return kb.as_markup()
 
 def admin_pick_group_kb(kind:str) -> InlineKeyboardMarkup:
@@ -2423,12 +3011,8 @@ async def capture_full_name(message: Message, state: FSMContext):
         await message.answer("Отлично! Внизу у вас закреплена кнопка «🧰 Меню».", reply_markup=reply_menu_kb())
         await show_main_menu(message.chat.id, message.from_user.id, u, f"✅ Зарегистрировано как: <b>{text}</b>")
     else:
-        # Изменение имени
-        if from_settings:
-            await show_settings_menu(message.bot, message.chat.id, message.from_user.id,
-                                     f"✏️ Имя изменено на: <b>{text}</b>\n\nЗдесь вы можете сменить ФИО.")
-        else:
-            await show_main_menu(message.chat.id, message.from_user.id, u, f"✏️ Имя изменено на: <b>{text}</b>")
+        # Изменение имени — возвращаем в главное меню
+        await show_main_menu(message.chat.id, message.from_user.id, u, f"✏️ Имя изменено на: <b>{text}</b>")
 
 # -------------- Рисовалки экранов --------------
 
@@ -2443,7 +3027,10 @@ async def show_main_menu(chat_id:int, user_id:int, u:dict, header:str):
     # у обычных статистика — без ФИО, а шапка остаётся
     name = (u or {}).get("full_name") or "—"
     role_suffix = " (бригадир)" if role == "brigadier" else (" (админ)" if role == "admin" else "")
-    text = f"👋 Привет, <b>{name}</b>{role_suffix}!\n\nВыберите действие:"
+    prefix = (header or "").strip()
+    if prefix:
+        prefix = prefix + "\n\n"
+    text = f"{prefix}👋 Привет, <b>{name}</b>{role_suffix}!\n\nВыберите действие:"
     if role == "it":
         text += (
             "\n\nДоступные команды:\n"
@@ -2574,7 +3161,7 @@ def _format_otd_summary(work: dict) -> str:
     lines.append(f"6. Культура - {work.get('crop', '—')}")
     location = work.get("location") or "—"
     lines.append(f"7. Место - {location}")
-    if work.get("machine_type") == "КамАЗ":
+    if work.get("machine_mode") == "single":
         lines.append(f"8. Рейсов - {work.get('trips') or 0}")
     lines.append("\nВсе верно?")
     return "\n".join(lines)
@@ -2733,8 +3320,12 @@ async def otd_back_mkind(c: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "otd:back:tractor")
 async def otd_back_tractor(c: CallbackQuery, state: FSMContext):
     await state.set_state(OtdFSM.pick_machine)
+    data = await state.get_data()
+    kind_id = data.get("otd_machine_kind_id")
+    mk = get_machine_kind(int(kind_id)) if kind_id else None
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Выберите трактор:", reply_markup=otd_tractor_kb())
+                        f"Выберите технику ({(mk or {}).get('title') or '—'}):",
+                        reply_markup=otd_machine_name_kb(int(kind_id) if kind_id else 1))
     await c.answer()
 
 @router.callback_query(F.data == "otd:back:fieldprev")
@@ -2756,11 +3347,11 @@ async def otd_back_field(c: CallbackQuery, state: FSMContext):
 async def otd_back_loc_or_work(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     work = data.get("otd", {})
-    if work.get("machine_type") == "КамАЗ" and work.get("trips") is not None:
+    if work.get("machine_mode") == "single" and work.get("trips") is not None:
         await state.set_state(OtdFSM.pick_location)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                             "Где погружались?", reply_markup=otd_fields_kb("otd:load"))
-    elif work.get("machine_type") == "Трактор":
+    elif work.get("act_grp") == GROUP_TECH and work.get("machine_mode") != "single":
         await state.set_state(OtdFSM.pick_location)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                             "Выберите поле:", reply_markup=otd_fields_kb("otd:field"))
@@ -2851,37 +3442,95 @@ async def otd_pick_type(c: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("otd:mkind:"))
 async def otd_pick_machine_kind(c: CallbackQuery, state: FSMContext):
-    mkind = c.data.split(":", 2)[2]
+    raw_id = c.data.split(":", 2)[2]
+    try:
+        kind_id = int(raw_id)
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    mk = get_machine_kind(kind_id)
+    if not mk:
+        await c.answer("Техника не найдена", show_alert=True)
+        return
     data = await state.get_data()
     work = data.get("otd", {})
-    if mkind == "tractor":
-        work["machine_type"] = "Трактор"
-        work["machine_name"] = None
-        await state.update_data(otd=work)
-        await state.set_state(OtdFSM.pick_machine)
-        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                            "Выберите трактор:", reply_markup=otd_tractor_kb())
-    else:
-        work["machine_type"] = "КамАЗ"
-        work["machine_name"] = "КамАЗ"
+    work["machine_type"] = mk["title"]
+    work["machine_name"] = None
+    work["machine_mode"] = mk.get("mode") or "list"
+    await state.update_data(otd=work, otd_machine_kind_id=kind_id)
+
+    if (mk.get("mode") or "list") == "single":
+        work["machine_name"] = mk["title"]
         await state.update_data(otd=work)
         await state.set_state(OtdFSM.pick_crop)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                             "Груз:", reply_markup=otd_crops_kb(kamaz=True))
+        await c.answer()
+        return
+
+    if count_machine_items(kind_id) <= 0:
+        await state.set_state(OtdFSM.pick_machine_custom)
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            f"Введите технику ({mk['title']}) текстом:",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:mkind")]
+                            ]))
+        await c.answer()
+        return
+
+    await state.set_state(OtdFSM.pick_machine)
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Выберите технику ({mk['title']}):", reply_markup=otd_machine_name_kb(kind_id))
     await c.answer()
 
-@router.callback_query(F.data.startswith("otd:tractor:"))
-async def otd_pick_tractor(c: CallbackQuery, state: FSMContext):
-    name = c.data.split(":", 2)[2]
+@router.callback_query(F.data.startswith("otd:mname:"))
+async def otd_pick_machine_name(c: CallbackQuery, state: FSMContext):
+    parts = c.data.split(":")
+    # otd:mname:<item_id>  OR  otd:mname:__other__:<kind_id>
+    if len(parts) >= 4 and parts[2] == "__other__":
+        await state.set_state(OtdFSM.pick_machine_custom)
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            "Введите технику текстом:",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:mkind")]
+                            ]))
+        await c.answer()
+        return
+    try:
+        item_id = int(parts[2])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    it = get_machine_item(item_id)
+    if not it:
+        await c.answer("Техника не найдена", show_alert=True)
+        return
     data = await state.get_data()
     work = data.get("otd", {})
-    work["machine_name"] = name
-    work["machine_type"] = "Трактор"
+    mk = get_machine_kind(it["kind_id"]) or {}
+    work["machine_name"] = it["name"]
+    work["machine_type"] = mk.get("title") or work.get("machine_type")
     await state.update_data(otd=work)
     await state.set_state(OtdFSM.pick_activity)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Вид деятельности трактора:", reply_markup=otd_tractor_work_kb())
+                        "Вид деятельности техники:", reply_markup=otd_tractor_work_kb())
     await c.answer()
+
+@router.message(OtdFSM.pick_machine_custom)
+async def otd_pick_machine_custom(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Введите технику.")
+        return
+    data = await state.get_data()
+    work = data.get("otd", {})
+    kind_id = data.get("otd_machine_kind_id")
+    mk = get_machine_kind(int(kind_id)) if kind_id else None
+    work["machine_type"] = (mk or {}).get("title") or work.get("machine_type")
+    work["machine_name"] = text
+    await state.update_data(otd=work)
+    await state.set_state(OtdFSM.pick_activity)
+    await message.answer("Вид деятельности техники:", reply_markup=otd_tractor_work_kb())
 
 @router.callback_query(F.data.startswith("otd:twork:"))
 async def otd_pick_twork(c: CallbackQuery, state: FSMContext):
@@ -2918,7 +3567,7 @@ async def otd_pick_field(c: CallbackQuery, state: FSMContext):
     await state.update_data(otd=work)
     await state.set_state(OtdFSM.pick_crop)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Культура:", reply_markup=otd_crops_kb(kamaz=(work.get("machine_type") == "КамАЗ")))
+                        "Культура:", reply_markup=otd_crops_kb(kamaz=(work.get("machine_mode") == "single")))
     await c.answer()
 
 @router.callback_query(F.data.startswith("otd:hand:"))
@@ -2933,7 +3582,7 @@ async def otd_pick_hand(c: CallbackQuery, state: FSMContext):
     await state.update_data(otd=work)
     await state.set_state(OtdFSM.pick_crop)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Культура:", reply_markup=otd_crops_kb(kamaz=(work.get("machine_type") == "КамАЗ")))
+                        "Культура:", reply_markup=otd_crops_kb(kamaz=(work.get("machine_mode") == "single")))
     await c.answer()
 
 @router.callback_query(F.data.startswith("otd:crop:"))
@@ -3030,7 +3679,7 @@ async def otd_pick_location_custom(message: Message, state: FSMContext):
     else:
         await state.set_state(OtdFSM.pick_crop)
         await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
-                            "Культура:", reply_markup=otd_crops_kb(kamaz=(work.get("machine_type") == "КамАЗ")))
+                            "Культура:", reply_markup=otd_crops_kb(kamaz=(work.get("machine_mode") == "single")))
 
 @router.callback_query(F.data == "otd:confirm:edit")
 async def otd_confirm_edit(c: CallbackQuery, state: FSMContext):
@@ -3306,8 +3955,8 @@ async def brig_pick_mode(c: CallbackQuery, state: FSMContext):
     else:
         await state.set_state(BrigFSM.pick_machine_kind)
         kb = InlineKeyboardBuilder()
-        kb.button(text="Трактор", callback_data="brig:mkind:tractor")
-        kb.button(text="КамАЗ", callback_data="brig:mkind:kamaz")
+        for k in list_machine_kinds(limit=50, offset=0):
+            kb.button(text=(k.get("title") or "—")[:64], callback_data=f"brig:mkind:{k['id']}")
         kb.button(text="🔙 Назад", callback_data="brig:back:mode")
         kb.adjust(2,1)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
@@ -3331,23 +3980,34 @@ async def brig_back_mode(c: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("brig:mkind:"))
 async def brig_pick_machine_kind(c: CallbackQuery, state: FSMContext):
-    kind = c.data.split(":")[2]
+    raw_id = c.data.split(":")[2]
+    try:
+        kind_id = int(raw_id)
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    mk = get_machine_kind(kind_id)
+    if not mk:
+        await c.answer("Техника не найдена", show_alert=True)
+        return
     data = await state.get_data()
     brig = data.get("brig", {})
-    brig["tech_kind"] = kind
+    brig["tech_kind_id"] = kind_id
+    brig["tech_kind_title"] = mk["title"]
+    brig["machine_mode"] = mk.get("mode") or "list"
     await state.update_data(brig=brig)
-    if kind == "tractor":
+    if (mk.get("mode") or "list") != "single":
         await state.set_state(BrigFSM.pick_machine_name)
         kb = InlineKeyboardBuilder()
-        for name in ["JD7(с)", "JD7(н)", "GD8", "GD6", "Оранжевый", "Погрузчик", "Комбайн"]:
-            kb.button(text=name, callback_data=f"brig:mname:{name}")
-        kb.button(text="Прочее", callback_data="brig:mname:__other__")
+        for it in list_machine_items(kind_id, limit=50, offset=0):
+            kb.button(text=(it.get("name") or "—")[:64], callback_data=f"brig:mname:{it['id']}")
+        kb.button(text="Прочее", callback_data=f"brig:mname:__other__:{kind_id}")
         kb.button(text="🔙 Назад", callback_data="brig:back:mkind")
         kb.adjust(2,2)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                             "Выберите технику:", reply_markup=kb.as_markup())
     else:
-        brig["machine"] = "КамАЗ"
+        brig["machine"] = mk["title"]
         await state.update_data(brig=brig)
         await state.set_state(BrigFSM.pick_kamaz_crop)
         kb = InlineKeyboardBuilder()
@@ -3356,7 +4016,7 @@ async def brig_pick_machine_kind(c: CallbackQuery, state: FSMContext):
         kb.button(text="🔙 Назад", callback_data="brig:back:mkind")
         kb.adjust(2,2)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                            "КамАЗ: выберите культуру:", reply_markup=kb.as_markup())
+                            f"{mk['title']}: выберите культуру:", reply_markup=kb.as_markup())
     await c.answer()
 
 @router.callback_query(F.data == "brig:back:mkind")
@@ -3365,8 +4025,8 @@ async def brig_back_mkind(c: CallbackQuery, state: FSMContext):
     brig = data.get("brig", {})
     await state.set_state(BrigFSM.pick_machine_kind)
     kb = InlineKeyboardBuilder()
-    kb.button(text="Трактор", callback_data="brig:mkind:tractor")
-    kb.button(text="КамАЗ", callback_data="brig:mkind:kamaz")
+    for k in list_machine_kinds(limit=50, offset=0):
+        kb.button(text=(k.get("title") or "—")[:64], callback_data=f"brig:mkind:{k['id']}")
     kb.button(text="🔙 Назад", callback_data="brig:back:mode")
     kb.adjust(2,1)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
@@ -3375,7 +4035,8 @@ async def brig_back_mkind(c: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("brig:mname:"))
 async def brig_pick_machine_name(c: CallbackQuery, state: FSMContext):
-    name = c.data.split(":", 2)[2]
+    parts = c.data.split(":")
+    name = parts[2]
     data = await state.get_data()
     brig = data.get("brig", {})
     if name == "__other__":
@@ -3386,7 +4047,16 @@ async def brig_pick_machine_name(c: CallbackQuery, state: FSMContext):
                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:mkind")]
                             ]))
     else:
-        brig["machine"] = name
+        try:
+            item_id = int(name)
+        except Exception:
+            await c.answer("Некорректный выбор", show_alert=True)
+            return
+        it = get_machine_item(item_id)
+        if not it:
+            await c.answer("Техника не найдена", show_alert=True)
+            return
+        brig["machine"] = it["name"]
         await state.update_data(brig=brig)
         await state.set_state(BrigFSM.pick_machine_activity)
         kb = InlineKeyboardBuilder()
@@ -3422,10 +4092,13 @@ async def brig_pick_machine_name_custom(message: Message, state: FSMContext):
 @router.callback_query(F.data == "brig:back:mname")
 async def brig_back_mname(c: CallbackQuery, state: FSMContext):
     await state.set_state(BrigFSM.pick_machine_name)
+    data = await state.get_data()
+    brig = data.get("brig", {})
+    kind_id = brig.get("tech_kind_id") or 1
     kb = InlineKeyboardBuilder()
-    for name in ["JD7(с)", "JD7(н)", "GD8", "GD6", "Оранжевый", "Погрузчик", "Комбайн"]:
-        kb.button(text=name, callback_data=f"brig:mname:{name}")
-    kb.button(text="Прочее", callback_data="brig:mname:__other__")
+    for it in list_machine_items(int(kind_id), limit=50, offset=0):
+        kb.button(text=(it.get("name") or "—")[:64], callback_data=f"brig:mname:{it['id']}")
+    kb.button(text="Прочее", callback_data=f"brig:mname:__other__:{kind_id}")
     kb.button(text="🔙 Назад", callback_data="brig:back:mkind")
     kb.adjust(2,2)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
@@ -4390,7 +5063,7 @@ async def adm_root_loc(c: CallbackQuery):
         await c.answer("Нет прав", show_alert=True)
         return
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Локации: добавить или удалить", reply_markup=admin_root_loc_kb())
+                        "Локации: выберите локацию:", reply_markup=admin_root_loc_list_kb(page=0))
     await c.answer()
 
 @router.callback_query(F.data == "adm:root:act")
@@ -4399,37 +5072,434 @@ async def adm_root_act(c: CallbackQuery):
         await c.answer("Нет прав", show_alert=True)
         return
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Работы: добавить или удалить", reply_markup=admin_root_act_kb())
+                        "Работа: выберите тип работ:", reply_markup=admin_root_act_pick_grp_kb())
     await c.answer()
 
-@router.callback_query(F.data.startswith("adm:root:tech"))
-async def adm_root_tech(c: CallbackQuery):
+@router.callback_query(F.data.startswith("adm:root:loc:page:"))
+async def adm_root_loc_page(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        page = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        page = 0
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Локации: выберите локацию:", reply_markup=admin_root_loc_list_kb(page=page))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:loc:item:"))
+async def adm_root_loc_item(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        loc_id = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    loc = get_location_by_id(loc_id)
+    if not loc:
+        await c.answer("Локация не найдена", show_alert=True)
+        return
+    grp = loc.get("grp") or ""
+    grp_lbl = "поля" if grp == GROUP_FIELDS else ("склад" if grp == GROUP_WARE else grp)
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Локация: <b>{loc['name']}</b> ({grp_lbl})", reply_markup=admin_root_loc_item_kb(loc_id))
+    await c.answer()
+
+@router.callback_query(F.data == "adm:root:loc:add")
+async def adm_root_loc_add(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Добавить локацию: выберите группу", reply_markup=admin_root_loc_add_grp_kb())
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:loc:addgrp:"))
+async def adm_root_loc_addgrp(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    grp = c.data.rsplit(":", 1)[1]  # fields/ware
+    await state.set_state(AdminFSM.add_name)
+    await state.update_data(admin_kind="loc", admin_grp=grp, admin_done="adm:root:loc")
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Введите название локации:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Назад", callback_data="adm:root:loc:add")],
+                            [InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root")]
+                        ]))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:loc:edit:"))
+async def adm_root_loc_edit(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        loc_id = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    loc = get_location_by_id(loc_id)
+    if not loc:
+        await c.answer("Локация не найдена", show_alert=True)
+        return
+    await state.set_state(AdminFSM.edit_name)
+    await state.update_data(edit_kind="loc", edit_id=loc_id, edit_return="adm:root:loc")
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Введите новое название локации:\n\nТекущее: <b>{loc['name']}</b>",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Назад", callback_data=f"adm:root:loc:item:{loc_id}")],
+                            [InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root")]
+                        ]))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:loc:del:"))
+async def adm_root_loc_del(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        loc_id = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    loc = get_location_by_id(loc_id)
+    if not loc:
+        await c.answer("Локация не найдена", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"adm:confirm:del:loc:{loc_id}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"adm:root:loc:item:{loc_id}")]
+    ])
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Точно удалить локацию <b>{loc['name']}</b>?",
+                        reply_markup=kb)
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:act:grp:"))
+async def adm_root_act_grp(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    grp = c.data.rsplit(":", 1)[1]  # tech/hand
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Работа: выберите элемент:", reply_markup=admin_root_act_list_kb(grp, page=0))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:act:page:"))
+async def adm_root_act_page(c: CallbackQuery):
     if not is_admin(c):
         await c.answer("Нет прав", show_alert=True)
         return
     parts = c.data.split(":")
-    if len(parts) == 3:
-        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                            "Техника: выберите подгруппу", reply_markup=admin_root_tech_kb())
-    else:
-        sub = parts[3]
-        label = "Трактор" if sub == "tractor" else "КамАЗ"
-        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                            f"Техника ({label}): выберите действие",
-                            reply_markup=admin_root_tech_actions_kb(sub))
+    grp = parts[4]
+    try:
+        page = int(parts[5])
+    except Exception:
+        page = 0
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Работа: выберите элемент:", reply_markup=admin_root_act_list_kb(grp, page=page))
     await c.answer()
 
-@router.callback_query(F.data.startswith("adm:root:crop"))
+@router.callback_query(F.data.startswith("adm:root:act:item:"))
+async def adm_root_act_item(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    parts = c.data.split(":")
+    grp = parts[4]
+    try:
+        act_id = int(parts[5])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    act = get_activity_by_id(act_id)
+    if not act:
+        await c.answer("Элемент не найден", show_alert=True)
+        return
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Работа ({'техника' if grp=='tech' else 'ручная'}): <b>{act['name']}</b>",
+                        reply_markup=admin_root_act_item_kb(grp, act_id))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:act:add:"))
+async def adm_root_act_add(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    grp = c.data.rsplit(":", 1)[1]  # tech/hand
+    await state.set_state(AdminFSM.add_name)
+    await state.update_data(admin_kind="act", admin_grp=grp, admin_done=f"adm:root:act:grp:{grp}")
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Введите название работы:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Назад", callback_data=f"adm:root:act:grp:{grp}")],
+                            [InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root")]
+                        ]))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:act:edit:"))
+async def adm_root_act_edit(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    parts = c.data.split(":")
+    grp = parts[4]
+    try:
+        act_id = int(parts[5])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    act = get_activity_by_id(act_id)
+    if not act:
+        await c.answer("Элемент не найден", show_alert=True)
+        return
+    await state.set_state(AdminFSM.edit_name)
+    await state.update_data(edit_kind="act", edit_id=act_id, edit_grp=grp, edit_return=f"adm:root:act:item:{grp}:{act_id}")
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Введите новое название работы:\n\nТекущее: <b>{act['name']}</b>",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Назад", callback_data=f"adm:root:act:item:{grp}:{act_id}")],
+                            [InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root")]
+                        ]))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:act:del:"))
+async def adm_root_act_del(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    parts = c.data.split(":")
+    grp = parts[4]
+    try:
+        act_id = int(parts[5])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    act = get_activity_by_id(act_id)
+    if not act:
+        await c.answer("Элемент не найден", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"adm:confirm:del:act:{grp}:{act_id}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"adm:root:act:item:{grp}:{act_id}")]
+    ])
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Точно удалить работу <b>{act['name']}</b>?",
+                        reply_markup=kb)
+    await c.answer()
+
+@router.callback_query(F.data == "adm:root:tech")
+async def adm_root_tech(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Техника: выберите раздел:", reply_markup=admin_root_tech_kb())
+    await c.answer()
+
+@router.callback_query(F.data == "adm:root:tech:tractor")
+async def adm_root_tech_tractor(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Трактор: выберите технику:", reply_markup=admin_root_tech_items_kb(1, page=0))
+    await c.answer()
+
+@router.callback_query(F.data == "adm:root:tech:kamaz")
+async def adm_root_tech_kamaz(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "КамАЗ:", reply_markup=admin_root_tech_kamaz_kb())
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:tech:page:"))
+async def adm_root_tech_page(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    parts = c.data.split(":")
+    try:
+        kind_id = int(parts[4])
+        page = int(parts[5])
+    except Exception:
+        kind_id, page = 1, 0
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Техника: выберите:", reply_markup=admin_root_tech_items_kb(kind_id, page=page))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:tech:item:"))
+async def adm_root_tech_item(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    parts = c.data.split(":")
+    try:
+        kind_id = int(parts[4])
+        item_id = int(parts[5])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    it = get_machine_item(item_id)
+    mk = get_machine_kind(kind_id) or {}
+    if not it:
+        await c.answer("Не найдено", show_alert=True)
+        return
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"{(mk.get('title') or 'Техника')}: <b>{it['name']}</b>",
+                        reply_markup=admin_root_tech_item_kb(kind_id, item_id))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:tech:add:"))
+async def adm_root_tech_add(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        kind_id = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        kind_id = 1
+    mk = get_machine_kind(kind_id) or {"title": "Техника"}
+    await state.set_state(AdminFSM.add_name)
+    await state.update_data(admin_kind="tech_item", admin_kind_id=kind_id, admin_done=f"adm:root:tech:tractor")
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Введите название техники ({mk['title']}):",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Назад", callback_data="adm:root:tech:tractor")],
+                            [InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root")]
+                        ]))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:tech:edit:"))
+async def adm_root_tech_edit(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    parts = c.data.split(":")
+    try:
+        kind_id = int(parts[4])
+        item_id = int(parts[5])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    it = get_machine_item(item_id)
+    if not it:
+        await c.answer("Не найдено", show_alert=True)
+        return
+    await state.set_state(AdminFSM.edit_name)
+    await state.update_data(edit_kind="tech_item", edit_id=item_id, edit_kind_id=kind_id)
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Введите новое название техники:\n\nТекущее: <b>{it['name']}</b>",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Назад", callback_data=f"adm:root:tech:item:{kind_id}:{item_id}")],
+                            [InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root")]
+                        ]))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:tech:del:"))
+async def adm_root_tech_del(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    parts = c.data.split(":")
+    try:
+        kind_id = int(parts[4])
+        item_id = int(parts[5])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    it = get_machine_item(item_id)
+    if not it:
+        await c.answer("Не найдено", show_alert=True)
+        return
+    mk = get_machine_kind(kind_id) or {}
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"adm:confirm:del:tech:{kind_id}:{item_id}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"adm:root:tech:item:{kind_id}:{item_id}")]
+    ])
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Точно удалить {(mk.get('title') or 'технику')}: <b>{it['name']}</b>?",
+                        reply_markup=kb)
+    await c.answer()
+
+@router.callback_query(F.data == "adm:root:techkind:add")
+async def adm_root_techkind_add(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    await state.set_state(AdminFSM.add_name)
+    await state.update_data(admin_kind="tech_kind", admin_done="adm:root:tech")
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Введите название нового типа техники (например: Комбайн):",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Назад", callback_data="adm:root:tech")],
+                            [InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root")]
+                        ]))
+    await c.answer()
+
+@router.callback_query(F.data == "adm:root:techkind:del")
+async def adm_root_techkind_del(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Удалить тип техники:", reply_markup=admin_root_tech_kind_del_kb(page=0))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:techkind:page:"))
+async def adm_root_techkind_page(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        page = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        page = 0
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Удалить тип техники:", reply_markup=admin_root_tech_kind_del_kb(page=page))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:techkind:delpick:"))
+async def adm_root_techkind_delpick(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        kind_id = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    mk = get_machine_kind(kind_id)
+    if not mk:
+        await c.answer("Не найдено", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"adm:confirm:del:techkind:{kind_id}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:root:tech")]
+    ])
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Точно удалить тип техники <b>{mk['title']}</b>?\n\n"
+                        f"Вместе с ним удалится список техники внутри.",
+                        reply_markup=kb)
+    await c.answer()
+
+@router.callback_query(F.data == "adm:root:crop")
 async def adm_root_crop(c: CallbackQuery):
     if not is_admin(c):
         await c.answer("Нет прав", show_alert=True)
         return
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Культуры: выбрать действие", reply_markup=admin_root_crop_kb())
+                        "Культуры: выберите культуру:", reply_markup=admin_root_crop_list_kb(page=0))
     await c.answer()
 
-@router.callback_query(F.data.startswith("adm:root:tech:add:"))
-async def adm_root_tech_add(c: CallbackQuery):
+# legacy handlers below are disabled (kept only for reference)
+@router.callback_query(F.data.startswith("adm:root:tech:legacy:add:"))
+async def adm_root_tech_add_legacy(c: CallbackQuery):
     if not is_admin(c):
         await c.answer("Нет прав", show_alert=True)
         return
@@ -4445,8 +5515,8 @@ async def adm_root_tech_add(c: CallbackQuery):
                         ]))
     await c.answer()
 
-@router.callback_query(F.data.startswith("adm:root:tech:del:"))
-async def adm_root_tech_del(c: CallbackQuery):
+@router.callback_query(F.data.startswith("adm:root:tech:legacy:del:"))
+async def adm_root_tech_del_legacy(c: CallbackQuery):
     if not is_admin(c):
         await c.answer("Нет прав", show_alert=True)
         return
@@ -4467,8 +5537,8 @@ async def adm_root_tech_del(c: CallbackQuery):
                         f"Удалить технику ({label}):", reply_markup=kb.as_markup())
     await c.answer()
 
-@router.callback_query(F.data.startswith("adm:root:tech:delpick:"))
-async def adm_root_tech_delpick(c: CallbackQuery):
+@router.callback_query(F.data.startswith("adm:root:tech:legacy:delpick:"))
+async def adm_root_tech_delpick_legacy(c: CallbackQuery):
     if not is_admin(c):
         await c.answer("Нет прав", show_alert=True)
         return
@@ -4484,7 +5554,7 @@ async def adm_root_crop_add(c: CallbackQuery):
         await c.answer("Нет прав", show_alert=True)
         return
     await state.set_state(AdminFSM.add_name)
-    await state.update_data(admin_kind="crop", admin_grp="crop")
+    await state.update_data(admin_kind="crop", admin_grp="crop", admin_done="adm:root:crop")
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                         "Введите название культуры:",
                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -4493,36 +5563,124 @@ async def adm_root_crop_add(c: CallbackQuery):
                         ]))
     await c.answer()
 
-@router.callback_query(F.data == "adm:root:crop:del")
-async def adm_root_crop_del(c: CallbackQuery):
+@router.callback_query(F.data.startswith("adm:root:crop:page:"))
+async def adm_root_crop_page(c: CallbackQuery):
     if not is_admin(c):
         await c.answer("Нет прав", show_alert=True)
         return
-    items = list_crops()
-    kb = InlineKeyboardBuilder()
-    if items:
-        for it in items:
-            safe = it.replace(":", "_")[:20]
-            kb.button(text=f"🗑 {it}", callback_data=f"adm:root:crop:delpick:{safe}")
-        kb.adjust(2)
-    else:
-        kb.button(text="— список пуст —", callback_data="adm:root:crop")
-    kb.button(text="🔙 Назад", callback_data="adm:root:crop")
-    kb.button(text="⬅️ В корень", callback_data="adm:root")
+    try:
+        page = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        page = 0
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Удалить культуру:", reply_markup=kb.as_markup())
+                        "Культуры: выберите культуру:", reply_markup=admin_root_crop_list_kb(page=page))
     await c.answer()
 
-@router.callback_query(F.data.startswith("adm:root:crop:delpick:"))
-async def adm_root_crop_delpick(c: CallbackQuery):
+@router.callback_query(F.data.startswith("adm:root:crop:item:"))
+async def adm_root_crop_item(c: CallbackQuery):
     if not is_admin(c):
         await c.answer("Нет прав", show_alert=True)
         return
-    name = c.data.split(":", 3)[3].replace("_", " ")
-    remove_crop(name)
+    try:
+        crop_id = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    crop = get_crop_by_rowid(crop_id)
+    if not crop:
+        await c.answer("Культура не найдена", show_alert=True)
+        return
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        f"Культура '{name}' удалена.", reply_markup=admin_root_crop_kb())
-    await c.answer("Удалено")
+                        f"Культура: <b>{crop['name']}</b>", reply_markup=admin_root_crop_item_kb(crop_id))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:crop:edit:"))
+async def adm_root_crop_edit(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        crop_id = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    crop = get_crop_by_rowid(crop_id)
+    if not crop:
+        await c.answer("Культура не найдена", show_alert=True)
+        return
+    await state.set_state(AdminFSM.edit_name)
+    await state.update_data(edit_kind="crop", edit_id=crop_id)
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Введите новое название культуры:\n\nТекущее: <b>{crop['name']}</b>",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔙 Назад", callback_data=f"adm:root:crop:item:{crop_id}")],
+                            [InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root")]
+                        ]))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:root:crop:delid:"))
+async def adm_root_crop_delid(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        crop_id = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    crop = get_crop_by_rowid(crop_id)
+    if not crop:
+        await c.answer("Культура не найдена", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"adm:confirm:del:crop:{crop_id}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"adm:root:crop:item:{crop_id}")]
+    ])
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"Точно удалить культуру <b>{crop['name']}</b>?",
+                        reply_markup=kb)
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:confirm:del:"))
+async def adm_confirm_delete(c: CallbackQuery):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    parts = c.data.split(":")
+    # adm:confirm:del:<kind>:...
+    kind = parts[3] if len(parts) > 3 else ""
+    ok = False
+    if kind == "loc" and len(parts) >= 5:
+        ok = delete_location_by_id(int(parts[4]))
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            ("✅ Удалено" if ok else "⚠️ Не удалось удалить"),
+                            reply_markup=admin_root_loc_list_kb(page=0))
+    elif kind == "act" and len(parts) >= 6:
+        grp = parts[4]
+        ok = delete_activity_by_id(int(parts[5]))
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            ("✅ Удалено" if ok else "⚠️ Не удалось удалить"),
+                            reply_markup=admin_root_act_list_kb(grp, page=0))
+    elif kind == "crop" and len(parts) >= 5:
+        ok = delete_crop_by_rowid(int(parts[4]))
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            ("✅ Удалено" if ok else "⚠️ Не удалось удалить"),
+                            reply_markup=admin_root_crop_list_kb(page=0))
+    elif kind == "tech" and len(parts) >= 6:
+        kind_id = int(parts[4])
+        ok = delete_machine_item(int(parts[5]))
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            ("✅ Удалено" if ok else "⚠️ Не удалось удалить"),
+                            reply_markup=admin_root_tech_items_kb(kind_id, page=0))
+    elif kind == "techkind" and len(parts) >= 5:
+        ok = delete_machine_kind(int(parts[4]))
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            ("✅ Удалено" if ok else "⚠️ Не удалось удалить"),
+                            reply_markup=admin_root_tech_kb())
+    else:
+        await c.answer("Некорректное подтверждение", show_alert=True)
+        return
+    await c.answer("Удалено" if ok else "Ошибка", show_alert=not ok)
 
 @router.callback_query(F.data == "adm:roles")
 async def adm_roles(c: CallbackQuery, state: FSMContext):
@@ -4539,11 +5697,13 @@ async def adm_role_add_brig(c: CallbackQuery, state: FSMContext):
         await c.answer("Нет прав", show_alert=True)
         return
     await state.set_state(AdminFSM.add_brig_id)
-    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Введите user_id, которому выдать роль бригадира:",
-                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text="🔙 Назад", callback_data="adm:roles")]
-                        ]))
+    await _edit_or_send(
+        c.bot,
+        c.message.chat.id,
+        c.from_user.id,
+        "Введите @username или выберите из списка:",
+        reply_markup=admin_role_add_brig_kb(page=0),
+    )
     await c.answer()
 
 @router.message(AdminFSM.add_brig_id)
@@ -4557,13 +5717,14 @@ async def adm_role_add_brig_value(message: Message, state: FSMContext):
         if u:
             target_id = u["user_id"]
     if not target_id:
-        await message.answer("Укажите user_id или @username известного боту.",
-                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="adm:roles")]
-                             ]))
+        await message.answer(
+            "Введите @username или выберите из списка:",
+            reply_markup=admin_role_add_brig_kb(page=0),
+        )
         return
     set_role(target_id, "brigadier", message.from_user.id)
-    add_brigadier(target_id, None, None, message.from_user.id)
+    tu = get_user(target_id) or {}
+    add_brigadier(target_id, tu.get("username"), tu.get("full_name"), message.from_user.id)
     await state.clear()
     await message.answer(f"Роль бригадира выдана пользователю {target_id}",
                          reply_markup=admin_menu_kb())
@@ -4574,11 +5735,13 @@ async def adm_role_del_brig(c: CallbackQuery, state: FSMContext):
         await c.answer("Нет прав", show_alert=True)
         return
     await state.set_state(AdminFSM.del_brig_id)
-    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Введите user_id, у которого снять роль бригадира:",
-                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text="🔙 Назад", callback_data="adm:roles")]
-                        ]))
+    await _edit_or_send(
+        c.bot,
+        c.message.chat.id,
+        c.from_user.id,
+        "Выберите бригадира из списка или введите @username:",
+        reply_markup=admin_role_del_brig_kb(page=0),
+    )
     await c.answer()
 
 @router.message(AdminFSM.del_brig_id)
@@ -4592,16 +5755,102 @@ async def adm_role_del_brig_value(message: Message, state: FSMContext):
         if u:
             target_id = u["user_id"]
     if not target_id:
-        await message.answer("Укажите user_id или @username известного боту.",
-                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="adm:roles")]
-                             ]))
+        await message.answer(
+            "Выберите бригадира из списка или введите @username:",
+            reply_markup=admin_role_del_brig_kb(page=0),
+        )
         return
     clear_role(target_id, "brigadier")
     remove_brigadier(target_id)
     await state.clear()
     await message.answer(f"Роль бригадира снята с пользователя {target_id}",
                          reply_markup=admin_menu_kb())
+
+@router.callback_query(F.data.startswith("adm:role:add:brig:page:"))
+async def adm_role_add_brig_page(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        page = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        page = 0
+    await state.set_state(AdminFSM.add_brig_id)
+    await _edit_or_send(
+        c.bot,
+        c.message.chat.id,
+        c.from_user.id,
+        "Введите @username или выберите из списка:",
+        reply_markup=admin_role_add_brig_kb(page=page),
+    )
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:role:del:brig:page:"))
+async def adm_role_del_brig_page(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        page = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        page = 0
+    await state.set_state(AdminFSM.del_brig_id)
+    await _edit_or_send(
+        c.bot,
+        c.message.chat.id,
+        c.from_user.id,
+        "Выберите бригадира из списка или введите @username:",
+        reply_markup=admin_role_del_brig_kb(page=page),
+    )
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:role:add:brig:pick:"))
+async def adm_role_add_brig_pick(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        target_id = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    set_role(target_id, "brigadier", c.from_user.id)
+    tu = get_user(target_id) or {}
+    add_brigadier(target_id, tu.get("username"), tu.get("full_name"), c.from_user.id)
+    await state.clear()
+    who = _display_user(tu.get("full_name"), tu.get("username"), target_id)
+    await _edit_or_send(
+        c.bot,
+        c.message.chat.id,
+        c.from_user.id,
+        f"✅ Роль бригадира выдана: <b>{who}</b>",
+        reply_markup=admin_roles_kb(),
+    )
+    await c.answer("Готово")
+
+@router.callback_query(F.data.startswith("adm:role:del:brig:pick:"))
+async def adm_role_del_brig_pick(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        target_id = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    clear_role(target_id, "brigadier")
+    remove_brigadier(target_id)
+    await state.clear()
+    tu = get_user(target_id) or {}
+    who = _display_user(tu.get("full_name"), tu.get("username"), target_id)
+    await _edit_or_send(
+        c.bot,
+        c.message.chat.id,
+        c.from_user.id,
+        f"✅ Роль бригадира снята: <b>{who}</b>",
+        reply_markup=admin_roles_kb(),
+    )
+    await c.answer("Готово")
 
 # -------------- Изменение имени --------------
 
@@ -5632,19 +6881,129 @@ async def adm_add_name_value(message: Message, state: FSMContext):
     data = await state.get_data()
     kind = data.get("admin_kind")
     grp = data.get("admin_grp")
+    done = data.get("admin_done") or "menu:admin"
+    kind_id = data.get("admin_kind_id")
     name = (message.text or "").strip()
     ok = False
     if kind == "act":
         ok = add_activity(GROUP_TECH if grp=="tech" else GROUP_HAND, name)
+    elif kind == "crop":
+        ok = add_crop(name)
+    elif kind == "tech_kind":
+        ok = add_machine_kind(name, mode="list")
+    elif kind == "tech_item":
+        try:
+            ok = add_machine_item(int(kind_id), name) if kind_id is not None else False
+        except Exception:
+            ok = False
     else:
         ok = add_location(GROUP_FIELDS if grp=="fields" else GROUP_WARE, name)
     await state.clear()
-    if ok:
-        await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
-                            f"✅ Добавлено: <b>{name}</b>", reply_markup=admin_menu_kb())
+    text = (f"✅ Добавлено: <b>{name}</b>" if ok else f"⚠️ Не получилось (возможно, уже есть): <b>{name}</b>")
+    # Возврат туда, откуда пришли (root-списки / админ-меню)
+    if done == "adm:root:loc":
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, text, reply_markup=admin_root_loc_list_kb(page=0))
+        return
+    if done.startswith("adm:root:act:grp:"):
+        grp2 = done.rsplit(":", 1)[1]
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, text, reply_markup=admin_root_act_list_kb(grp2, page=0))
+        return
+    if done == "adm:root:crop":
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, text, reply_markup=admin_root_crop_list_kb(page=0))
+        return
+    if done == "adm:root:tech":
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, text, reply_markup=admin_root_tech_kb())
+        return
+    if done == "adm:root:tech:tractor":
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, text, reply_markup=admin_root_tech_items_kb(1, page=0))
+        return
+    await _edit_or_send(message.bot, message.chat.id, message.from_user.id, text, reply_markup=admin_menu_kb())
+
+@router.message(AdminFSM.edit_name)
+async def adm_edit_name_value(message: Message, state: FSMContext):
+    data = await state.get_data()
+    kind = data.get("edit_kind")
+    edit_id = data.get("edit_id")
+    grp = data.get("edit_grp")
+    kind_id = data.get("edit_kind_id")
+    new_name = (message.text or "").strip()
+    if not new_name:
+        await message.answer("Название не может быть пустым. Введите снова.")
+        return
+
+    # Подтверждение изменения (без применения сразу)
+    await state.set_state(AdminFSM.edit_confirm)
+    await state.update_data(pending_new_name=new_name)
+
+    old_name = "—"
+    cancel_cb = "menu:admin"
+    if kind == "loc" and edit_id:
+        loc = get_location_by_id(int(edit_id))
+        old_name = (loc or {}).get("name") or "—"
+        cancel_cb = f"adm:root:loc:item:{int(edit_id)}"
+    elif kind == "act" and edit_id:
+        act = get_activity_by_id(int(edit_id))
+        old_name = (act or {}).get("name") or "—"
+        cancel_cb = f"adm:root:act:item:{grp}:{int(edit_id)}"
+    elif kind == "crop" and edit_id:
+        crop = get_crop_by_rowid(int(edit_id))
+        old_name = (crop or {}).get("name") or "—"
+        cancel_cb = f"adm:root:crop:item:{int(edit_id)}"
+    elif kind == "tech_item" and edit_id:
+        it = get_machine_item(int(edit_id))
+        old_name = (it or {}).get("name") or "—"
+        cancel_cb = f"adm:root:tech:item:{int(kind_id) if kind_id else 1}:{int(edit_id)}"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data="adm:confirm:edit")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)]
+    ])
+    await message.answer(
+        f"Подтвердить изменение?\n\n<b>{old_name}</b> → <b>{new_name}</b>",
+        reply_markup=kb
+    )
+
+@router.callback_query(AdminFSM.edit_confirm, F.data == "adm:confirm:edit")
+async def adm_confirm_edit(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    data = await state.get_data()
+    kind = data.get("edit_kind")
+    edit_id = data.get("edit_id")
+    grp = data.get("edit_grp")
+    kind_id = data.get("edit_kind_id")
+    new_name = (data.get("pending_new_name") or "").strip()
+    ok = False
+    if kind == "loc":
+        ok = update_location_name(int(edit_id), new_name) if edit_id else False
+        await state.clear()
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            ("✅ Изменено" if ok else "⚠️ Не удалось изменить"),
+                            reply_markup=admin_root_loc_list_kb(page=0))
+    elif kind == "act":
+        ok = update_activity_name(int(edit_id), new_name) if edit_id else False
+        await state.clear()
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            ("✅ Изменено" if ok else "⚠️ Не удалось изменить"),
+                            reply_markup=admin_root_act_list_kb(grp or "tech", page=0))
+    elif kind == "crop":
+        ok = update_crop_name(int(edit_id), new_name) if edit_id else False
+        await state.clear()
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            ("✅ Изменено" if ok else "⚠️ Не удалось изменить"),
+                            reply_markup=admin_root_crop_list_kb(page=0))
+    elif kind == "tech_item":
+        ok = update_machine_item(int(edit_id), new_name) if edit_id else False
+        await state.clear()
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            ("✅ Изменено" if ok else "⚠️ Не удалось изменить"),
+                            reply_markup=admin_root_tech_items_kb(int(kind_id) if kind_id else 1, page=0))
     else:
-        await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
-                            f"⚠️ Не получилось (возможно, уже есть): <b>{name}</b>", reply_markup=admin_menu_kb())
+        await state.clear()
+        await c.answer("Ошибка состояния", show_alert=True)
+        return
+    await c.answer("Готово" if ok else "Ошибка", show_alert=not ok)
 
 @router.callback_query(F.data == "adm:del:act")
 async def adm_del_act(c: CallbackQuery, state: FSMContext):
