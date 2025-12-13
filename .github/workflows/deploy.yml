@@ -33,8 +33,13 @@ jobs:
             export GIT_SHA=$(git rev-parse --short HEAD)
             echo \"GIT_SHA=$GIT_SHA\"
             git log -1 --oneline
-            docker compose up -d --build
-            echo '--- docker ---'
-            docker ps --format 'table {{.Names}}\t{{.Status}}' | head -n 20
+            echo '--- precheck systemd ---'
+            whoami
+            systemctl is-active bot_polya || true
+            echo '--- update deps ---'
+            /root/terra-TgBot/venv/bin/pip install -r requirements.txt
+            echo '--- restart bot ---'
+            systemctl restart bot_polya
+            systemctl status bot_polya --no-pager | head -n 60
           "
 
