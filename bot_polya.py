@@ -2299,6 +2299,8 @@ def admin_root_loc_list_kb(page: int = 0, page_size: int = 12) -> InlineKeyboard
     items = list_locations_rows(limit=page_size, offset=offset)
 
     kb = InlineKeyboardBuilder()
+    # В начале списка — кнопка добавления
+    kb.row(InlineKeyboardButton(text="➕ Добавить", callback_data="adm:root:loc:add"))
     for it in items:
         grp = it.get("grp") or ""
         grp_lbl = "поля" if grp == GROUP_FIELDS else ("склад" if grp == GROUP_WARE else grp)
@@ -2315,7 +2317,6 @@ def admin_root_loc_list_kb(page: int = 0, page_size: int = 12) -> InlineKeyboard
         nav.adjust(3)
         kb.attach(nav)
 
-    kb.row(InlineKeyboardButton(text="➕ Добавить", callback_data="adm:root:loc:add"))
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:root"))
     return kb.as_markup()
 
@@ -2353,6 +2354,8 @@ def admin_root_act_list_kb(grp: str, page: int = 0, page_size: int = 12) -> Inli
     items = list_activities_rows(grp=grp_name, limit=page_size, offset=offset)
 
     kb = InlineKeyboardBuilder()
+    # В начале списка — кнопка добавления
+    kb.row(InlineKeyboardButton(text="➕ Добавить", callback_data=f"adm:root:act:add:{grp}"))
     for it in items:
         kb.button(text=it["name"][:64], callback_data=f"adm:root:act:item:{grp}:{it['id']}")
     kb.adjust(1)
@@ -2367,7 +2370,6 @@ def admin_root_act_list_kb(grp: str, page: int = 0, page_size: int = 12) -> Inli
         nav.adjust(3)
         kb.attach(nav)
 
-    kb.row(InlineKeyboardButton(text="➕ Добавить", callback_data=f"adm:root:act:add:{grp}"))
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:root:act"))
     kb.row(InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root"))
     return kb.as_markup()
@@ -2408,6 +2410,8 @@ def admin_root_tech_items_kb(kind_id: int, page: int = 0, page_size: int = 12) -
     items = list_machine_items(kind_id, limit=page_size, offset=offset)
 
     kb = InlineKeyboardBuilder()
+    # В начале списка — кнопка добавления
+    kb.row(InlineKeyboardButton(text="➕ Добавить", callback_data=f"adm:root:tech:add:{kind_id}"))
     for it in items:
         kb.button(text=(it.get("name") or "—")[:64], callback_data=f"adm:root:tech:item:{kind_id}:{it['id']}")
     kb.adjust(1)
@@ -2422,7 +2426,6 @@ def admin_root_tech_items_kb(kind_id: int, page: int = 0, page_size: int = 12) -
         nav.adjust(3)
         kb.attach(nav)
 
-    kb.row(InlineKeyboardButton(text="➕ Добавить", callback_data=f"adm:root:tech:add:{kind_id}"))
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:root:tech"))
     kb.row(InlineKeyboardButton(text="⬅️ В корень", callback_data="adm:root"))
     return kb.as_markup()
@@ -2486,6 +2489,8 @@ def admin_root_crop_list_kb(page: int = 0, page_size: int = 12) -> InlineKeyboar
     items = list_crops_rows(page_size, offset)
 
     kb = InlineKeyboardBuilder()
+    # В начале списка — кнопка добавления
+    kb.row(InlineKeyboardButton(text="➕ Добавить", callback_data="adm:root:crop:add"))
     for it in items:
         kb.button(text=it["name"][:64], callback_data=f"adm:root:crop:item:{it['id']}")
     kb.adjust(1)
@@ -2500,7 +2505,6 @@ def admin_root_crop_list_kb(page: int = 0, page_size: int = 12) -> InlineKeyboar
         nav.adjust(3)
         kb.attach(nav)
 
-    kb.row(InlineKeyboardButton(text="➕ Добавить", callback_data="adm:root:crop:add"))
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:root"))
     return kb.as_markup()
 
