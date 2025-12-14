@@ -2991,6 +2991,38 @@ async def cmd_version(message: Message):
         return
     await message.answer(_runtime_version_info(message.from_user.id, message.from_user.username))
 
+@router.message(Command("reset_ui"))
+async def cmd_reset_ui(message: Message, state: FSMContext):
+    """
+    Админская команда: сбросить UI-стейт (menu/content message_id) и создать новое главное меню.
+    Нужна, чтобы убрать накопленные старые "обрезанные" меню-сообщения после миграций UI.
+    """
+    if not _is_allowed_topic(message):
+        return
+    if not is_admin(message):
+        return
+    await state.clear()
+    init_db()
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    target_chat_id, _extra = _ui_route_kwargs(chat_id)
+    st = _ui_get_state(target_chat_id, user_id)
+    # пытаемся удалить оба UI-сообщения (если возможно)
+    for key in ("content", "menu"):
+        mid = st.get(key)
+        if not mid:
+            continue
+        try:
+            await message.bot.delete_message(target_chat_id, int(mid))
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass
+        except Exception:
+            pass
+    _ui_save_state(target_chat_id, user_id, menu=None, content=None)
+    # удалим саму команду пользователя (если можем) и перерисуем меню
+    await _ui_try_delete_user_message(message)
+    await _ui_ensure_main_menu(message.bot, chat_id, user_id)
+
 @router.message(Command("menu"))
 async def cmd_menu(message: Message, state: FSMContext):
     # Проверяем разрешенную тему для команд
