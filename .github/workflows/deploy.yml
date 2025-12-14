@@ -42,5 +42,9 @@ jobs:
             echo '--- restart bot ---'
             systemctl restart bot_polya
             systemctl status bot_polya --no-pager | head -n 60
+            echo '--- recent logs (journalctl) ---'
+            journalctl -u bot_polya -n 120 --no-pager || true
+            echo '--- process check ---'
+            ps -ef | grep bot_polya.py | grep -v grep || true
           "
 
