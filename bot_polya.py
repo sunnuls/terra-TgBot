@@ -174,6 +174,8 @@ AUTO_EXPORT_CRON = os.getenv("AUTO_EXPORT_CRON", "0 9 * * 1")  # каждый п
 # - WORK_TOPIC_ID: id топика с иконкой робота, где показываем меню/диалоги
 # - STATS_CHAT_ID: id супергруппы для публикации статистики (может совпадать с WORK_CHAT_ID)
 # - STATS_TOPIC_ID: id отдельного топика, куда публикуются сводки
+# - READONLY_CHAT_ID: id супергруппы, где бот НЕ реагирует на команды/текст,
+#   а сообщения обычных пользователей удаляются (только отчёты от бота).
 def _env_int(name: str, default: Optional[int] = None) -> Optional[int]:
     v = (os.getenv(name, "") or "").strip()
     if not v or v == "-":
@@ -212,6 +214,10 @@ GROUP_CHAT_ID = _env_int("GROUP_CHAT_ID")
 HOURS_THREAD_ID = _env_int("HOURS_THREAD_ID")
 REPORTS_THREAD_ID = _env_int("REPORTS_THREAD_ID")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip()
+
+# "Только отчёты": в этом чате бот не отвечает на команды/текст,
+# а сообщения обычных пользователей удаляются.
+READONLY_CHAT_ID = _env_int("READONLY_CHAT_ID")
 
 # -----------------------------
 # Константы (дефолтные справочники)
@@ -2014,6 +2020,9 @@ def _is_regular_user_message(message: Message) -> bool:
 
 def _is_allowed_topic(message: Message) -> bool:
     """Проверяет, разрешена ли тема для команд бота"""
+    # В "read-only" чате бот не реагирует на команды/текст вообще
+    if READONLY_CHAT_ID and message.chat.id == READONLY_CHAT_ID:
+        return False
     # Если это не супергруппа или не настроены темы - разрешаем
     if not GROUP_CHAT_ID or message.chat.id != GROUP_CHAT_ID:
         return True
@@ -2953,6 +2962,26 @@ async def is_admin_user(bot: Bot, chat_id: int, user_id: int) -> bool:
 
 router = Router()
 router_topics = Router()  # Отдельный роутер для модерации тем
+
+# Полный read-only чат: удаляем сообщения обычных пользователей (включая команды).
+if READONLY_CHAT_ID is not None:
+    @router_topics.message(
+        F.chat.type == "supergroup",
+        F.chat.id == READONLY_CHAT_ID,
+    )
+    async def guard_readonly_chat(message: Message):
+        user = message.from_user
+        if not user:
+            return
+        # Разрешаем бота и админов
+        bot_me = await message.bot.me()
+        if user.id == bot_me.id or await is_admin_user(message.bot, message.chat.id, user.id):
+            return
+        # Все остальные удаляем молча
+        try:
+            await message.bot.delete_message(message.chat.id, message.message_id)
+        except Exception:
+            pass
 
 # Модерация темы "Часы" - удаляем все сообщения обычных пользователей
 if GROUP_CHAT_ID and HOURS_THREAD_ID:
@@ -7705,6 +7734,9 @@ async def adm_export(c: CallbackQuery):
 
 @router.message(StateFilter(None), F.text)
 async def any_text(message: Message):
+    # В запрещённых темах/чате не реагируем (чтобы в группе были только отчёты)
+    if not _is_allowed_topic(message):
+        return
     u = get_user(message.from_user.id)
     await show_main_menu(message.chat.id, message.from_user.id, u, "Меню")
 
