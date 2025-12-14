@@ -1892,45 +1892,17 @@ async def _ui_ensure_main_menu(bot: Bot, chat_id: int, user_id: int) -> int:
         state = _ui_get_state(target_chat_id, user_id)
         menu_id = state.get("menu")
 
+        # Главное меню теперь "статичное" и несёт ReplyKeyboard с кнопкой Reset.
+        # ReplyKeyboard нельзя безопасно обновлять через editMessage*, поэтому:
+        # - если menu_message_id есть, считаем, что меню уже есть и НЕ трогаем его
+        # - восстановить его всегда можно через /reset или кнопку "🔄 Сброс"
         if menu_id:
-            try:
-                # Пытаемся синхронизировать текст+клавиатуру. Если текст нельзя редактировать —
-                # тихо обновим только клавиатуру, НЕ пересоздавая сообщение.
-                try:
-                    await bot.edit_message_text(
-                        chat_id=target_chat_id,
-                        message_id=menu_id,
-                        text=desired_text,
-                        reply_markup=main_menu_kb(role),
-                        disable_web_page_preview=True,
-                    )
-                except TelegramBadRequest as e2:
-                    if "message is not modified" in str(e2).lower():
-                        pass
-                    elif "message can't be edited" in str(e2).lower() or "message is too old" in str(e2).lower():
-                        await bot.edit_message_reply_markup(
-                            chat_id=target_chat_id,
-                            message_id=menu_id,
-                            reply_markup=main_menu_kb(role),
-                        )
-                    else:
-                        raise
-                return int(menu_id)
-            except TelegramBadRequest as e:
-                if "message is not modified" in str(e).lower():
-                    return int(menu_id)
-                if "message to edit not found" in str(e).lower():
-                    menu_id = None
-                    _ui_save_state(target_chat_id, user_id, menu=None)
-                # если не можем редактировать — создадим новое "правильное" меню
-                if "message can't be edited" in str(e).lower() or "message is too old" in str(e).lower():
-                    menu_id = None
-                    _ui_save_state(target_chat_id, user_id, menu=None)
+            return int(menu_id)
 
         msg = await bot.send_message(
             target_chat_id,
             desired_text,
-            reply_markup=main_menu_kb(role),
+            reply_markup=reply_menu_kb(),
             disable_web_page_preview=True,
             **extra,
         )
@@ -3253,9 +3225,12 @@ async def capture_full_name(message: Message, state: FSMContext):
 # -------------- Рисовалки экранов --------------
 
 async def show_main_menu(chat_id:int, user_id:int, u:dict, header:str):
-    # Root should be максимально чистым: оставляем только основное (статичное) меню и удаляем контент.
+    # В схеме UI:
+    # - 1-е сообщение: статичное "приветствие" + ReplyKeyboard (🔄 Сброс)
+    # - 2-е сообщение: контент/подменю с InlineKeyboard
     await _ui_ensure_main_menu(bot, chat_id, user_id)
-    await _ui_clear_content(bot, chat_id, user_id)
+    role = get_role_label(user_id)
+    await _ui_edit_content(bot, chat_id, user_id, "Выберите действие:", reply_markup=main_menu_kb(role))
 
 async def show_settings_menu(bot: Bot, chat_id:int, user_id:int, header:str="Здесь вы можете сменить ФИО."):
     await _edit_or_send(bot, chat_id, user_id, header, reply_markup=settings_menu_kb())
