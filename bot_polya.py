@@ -26,6 +26,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
     BotCommand,
+    ChatPermissions,
     ChatMemberAdministrator,
     ChatMemberOwner,
 )
@@ -2529,7 +2530,7 @@ def otd_crops_kb(*, kamaz: bool = False) -> InlineKeyboardMarkup:
         if (c_name or "").strip() == "Прочее":
             kb.button(text="Прочее…", callback_data="otd:crop:__other__")
         else:
-        kb.button(text=c_name, callback_data=f"otd:crop:{c_name}")
+            kb.button(text=c_name, callback_data=f"otd:crop:{c_name}")
     kb.adjust(2)
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:loc_or_work"))
     return kb.as_markup()
@@ -3341,6 +3342,14 @@ async def cmd_list_roles(message: Message):
 
 @router.message(F.text.in_({"🧰 Меню", "🔄 Сброс"}))
 async def msg_persistent_menu(message: Message, state: FSMContext):
+    # В read-only чате не реагируем (и по возможности удаляем сообщение работяги)
+    if READONLY_CHAT_ID is not None and message.chat.id == READONLY_CHAT_ID:
+        if _is_regular_user_message(message):
+            try:
+                await message.bot.delete_message(message.chat.id, message.message_id)
+            except Exception:
+                pass
+        return
     # Нижняя кнопка теперь — "аварийный reset UI". Для совместимости принимаем и старый текст "🧰 Меню".
     await state.clear()
     await _ui_try_delete_user_message(message)
@@ -3498,9 +3507,9 @@ def _format_otd_summary(work: dict) -> str:
         lines.append(f"6. Место погрузки - {location}")
         lines.append(f"7. Рейсов - {work.get('trips') or 0}")
     else:
-    lines.append(f"5. Работа - {work.get('activity', '—')}")
-    lines.append(f"6. Культура - {work.get('crop', '—')}")
-    lines.append(f"7. Место - {location}")
+        lines.append(f"5. Работа - {work.get('activity', '—')}")
+        lines.append(f"6. Культура - {work.get('crop', '—')}")
+        lines.append(f"7. Место - {location}")
     return "\n".join(lines)
 
 def _format_otd_summary_with_title(work: dict, title: str) -> str:
@@ -4243,10 +4252,10 @@ async def otd_confirm_ok(c: CallbackQuery, state: FSMContext):
             await c.answer("Не все данные заполнены", show_alert=True)
             return
     else:
-    required = ("work_date", "hours", "activity", "crop")
-    if not all(work.get(k) for k in required):
-        await c.answer("Не все данные заполнены", show_alert=True)
-        return
+        required = ("work_date", "hours", "activity", "crop")
+        if not all(work.get(k) for k in required):
+            await c.answer("Не все данные заполнены", show_alert=True)
+            return
     # проверка лимита часов
     already = sum_hours_for_user_date(c.from_user.id, work["work_date"])
     if already + int(work["hours"]) > 24:
@@ -6098,7 +6107,7 @@ async def adm_root_crop(c: CallbackQuery):
 
 # legacy handlers below are disabled (kept only for reference)
 @router.callback_query(F.data.startswith("adm:root:tech:legacy:add:"))
-async def adm_root_tech_add_legacy(c: CallbackQuery):
+async def adm_root_tech_add_legacy(c: CallbackQuery, state: FSMContext):
     if not is_admin(c):
         await c.answer("Нет прав", show_alert=True)
         return
@@ -6148,7 +6157,7 @@ async def adm_root_tech_delpick_legacy(c: CallbackQuery):
     await c.answer("Удалено")
 
 @router.callback_query(F.data == "adm:root:crop:add")
-async def adm_root_crop_add(c: CallbackQuery):
+async def adm_root_crop_add(c: CallbackQuery, state: FSMContext):
     if not is_admin(c):
         await c.answer("Нет прав", show_alert=True)
         return
@@ -7823,6 +7832,25 @@ async def main():
 
     print("[main] db initialized")
     await ensure_robot_banner(bot)
+
+    # Read-only чат: запрещаем писать обычным пользователям на уровне прав чата
+    # (админы всё равно смогут писать). Если нет прав у бота — просто игнорируем.
+    if READONLY_CHAT_ID is not None:
+        try:
+            await bot.set_chat_permissions(
+                chat_id=READONLY_CHAT_ID,
+                permissions=ChatPermissions(
+                    can_send_messages=False,
+                    can_send_other_messages=False,
+                    can_send_polls=False,
+                    can_add_web_page_previews=False,
+                    can_invite_users=False,
+                    can_change_info=False,
+                    can_pin_messages=False,
+                ),
+            )
+        except Exception:
+            pass
     
     try:
         # Не ограничиваем allowed_updates: иначе можно случайно отрезать callback_query,
