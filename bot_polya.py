@@ -1,7 +1,8 @@
-﻿# bot_polya.py
+# bot_polya.py
 # -*- coding: utf-8 -*-
 
 import asyncio
+import html
 import os
 import sqlite3
 from contextlib import closing
@@ -2140,15 +2141,82 @@ def _format_user(who: dict) -> str:
     return str(who.get("user_id"))
 
 def _format_report_line(r: dict) -> str:
+    def esc(v: object) -> str:
+        return html.escape("" if v is None else str(v))
+
     who = _format_user({"full_name": r.get("reg_name"), "username": r.get("username"), "user_id": r.get("user_id")})
+    who = esc(who)
+    work_date = esc(r.get("work_date") or "—")
+    location = esc(r.get("location") or "—")
+    activity = esc(r.get("activity") or "—")
+    hours = esc(r.get("hours") if r.get("hours") is not None else "—")
+
+    extra: List[str] = []
+    mtype = (r.get("machine_type") or "").strip()
+    mname = (r.get("machine_name") or "").strip()
+    if mtype or mname:
+        extra.append(f"🚜 {esc((mtype + ' ' + mname).strip())}")
+    crop = (r.get("crop") or "").strip()
+    if crop:
+        extra.append(f"🌱 {esc(crop)}")
+    trips = r.get("trips")
+    if trips is not None:
+        try:
+            trips_int = int(trips)
+        except Exception:
+            trips_int = None
+        if trips_int is not None and trips_int != 0:
+            extra.append(f"🚚 рейсы: {esc(trips_int)}")
+
     return (
         f"👤 <b>{who}</b>\n"
-        f"📅 {r['work_date']}\n"
-        f"📍 {r['location']}\n"
-        f"🧰 {r['activity']}\n"
-        f"⏱️ {r['hours']} ч\n"
-        f"ID: <code>#{r['id']}</code>"
+        f"📅 {work_date}\n"
+        f"📍 {location}\n"
+        f"🧰 {activity}\n"
+        + (("\n".join(extra) + "\n") if extra else "")
+        + f"⏱️ {hours} ч\n"
+        f"ID: <code>#{esc(r.get('id'))}</code>"
     )
+
+def _format_report_changes(before: Optional[dict], after: dict) -> str:
+    """
+    Возвращает список изменений (что -> на что) для публикации в общем чате.
+    """
+    if not before:
+        return ""
+
+    def esc(v: object) -> str:
+        return html.escape("" if v is None else str(v))
+
+    def norm_str(v: object) -> str:
+        return "" if v is None else str(v).strip()
+
+    def machine_str(r: dict) -> str:
+        mt = norm_str(r.get("machine_type"))
+        mn = norm_str(r.get("machine_name"))
+        return (mt + (" " + mn if mn else "")).strip()
+
+    pairs: List[Tuple[str, str, str, str]] = []
+
+    # label, before_value, after_value, icon
+    pairs.append(("Дата", norm_str(before.get("work_date")), norm_str(after.get("work_date")), "📅"))
+    pairs.append(("Часы", norm_str(before.get("hours")), norm_str(after.get("hours")), "⏱️"))
+    pairs.append(("Место", norm_str(before.get("location")), norm_str(after.get("location")), "📍"))
+    pairs.append(("Работа", norm_str(before.get("activity")), norm_str(after.get("activity")), "🧰"))
+    pairs.append(("Техника", machine_str(before), machine_str(after), "🚜"))
+    pairs.append(("Культура", norm_str(before.get("crop")), norm_str(after.get("crop")), "🌱"))
+    pairs.append(("Рейсы", norm_str(before.get("trips")), norm_str(after.get("trips")), "🚚"))
+
+    changes: List[str] = []
+    for label, b, a, icon in pairs:
+        b2 = b if b else "—"
+        a2 = a if a else "—"
+        if b2 != a2:
+            changes.append(f"- {icon} <b>{esc(label)}</b>: {esc(b2)} → {esc(a2)}")
+
+    if not changes:
+        return ""
+    return "🔁 <b>Что изменили</b>:\n" + "\n".join(changes)
 
 async def stats_notify_created(bot: Bot, report_id:int):
     r = get_report(report_id)
@@ -2164,48 +2232,80 @@ async def stats_notify_created(bot: Bot, report_id:int):
         m = await bot.send_message(chat_id, text)
     stat_save_msg(report_id, chat_id, thread_id or 0, m.message_id, "created")
 
-async def stats_notify_changed(bot: Bot, report_id:int):
+async def stats_notify_changed(bot: Bot, report_id:int, before: Optional[dict] = None):
     r = get_report(report_id)
     if not r:
         return
     prev = stat_get_msg(report_id)
     chat_id, thread_id = await _stats_target()
-    text = "✏️ Изменена запись\n\n" + _format_report_line(r)
-    if prev:
-        p_chat, _, p_msg, _ = prev
-        try:
-            await bot.edit_message_text(chat_id=p_chat, message_id=p_msg, text=text)
-            stat_save_msg(report_id, p_chat, thread_id or 0, p_msg, "changed")
-            return
-        except TelegramBadRequest:
-            pass
-    # если не получилось — публикуем новую
-    if chat_id:
-        if thread_id:
-            m = await bot.send_message(chat_id, text, message_thread_id=thread_id)
-        else:
-            m = await bot.send_message(chat_id, text)
-        stat_save_msg(report_id, chat_id, thread_id or 0, m.message_id, "changed")
+    if not chat_id:
+        return
 
-async def stats_notify_deleted(bot: Bot, report_id:int):
-    prev = stat_get_msg(report_id)
+    diff = _format_report_changes(before, r)
+    announce_text = (
+        "✏️ Изменена запись\n\n" + (diff + "\n\n" if diff else "") + _format_report_line(r)
+    )
+    current_text = "🧾 Текущая запись\n\n" + _format_report_line(r)
+
+    # 1) Пытаемся обновить "закреплённое" сообщение отчёта (чтобы оно всегда было актуальным)
     if prev:
         p_chat, _, p_msg, _ = prev
         try:
-            await bot.edit_message_text(chat_id=p_chat, message_id=p_msg, text=f"🗑 Удалена запись\n\nID: <code>#{report_id}</code>")
-            stat_save_msg(report_id, p_chat, prev[1] or 0, p_msg, "deleted")
+            await bot.edit_message_text(chat_id=p_chat, message_id=p_msg, text=current_text)
+            stat_save_msg(report_id, p_chat, thread_id or 0, p_msg, "current")
+            # 2) И отдельным сообщением объявляем, что именно поменяли (чтобы это было заметно в чате)
+            if thread_id:
+                await bot.send_message(chat_id, announce_text, message_thread_id=thread_id)
+            else:
+                await bot.send_message(chat_id, announce_text)
             return
         except TelegramBadRequest:
-            pass
+            prev = None
+
+    # Если не было предыдущего поста (или не смогли отредактировать) — публикуем "изменение" как новый пост
+    if thread_id:
+        m = await bot.send_message(chat_id, announce_text, message_thread_id=thread_id)
+    else:
+        m = await bot.send_message(chat_id, announce_text)
+    stat_save_msg(report_id, chat_id, thread_id or 0, m.message_id, "changed")
+
+async def stats_notify_deleted(bot: Bot, report_id:int, deleted: Optional[dict] = None):
+    prev = stat_get_msg(report_id)
+    deleted_text = ""
+    if deleted:
+        try:
+            deleted_text = _format_report_line(deleted)
+        except Exception:
+            deleted_text = ""
+
+    delete_text = ("🗑 Удалена запись\n\n" + deleted_text) if deleted_text else f"🗑 Удалена запись\n\nID: <code>#{html.escape(str(report_id))}</code>"
+
     # нет предыдущего поста — отправим отдельным сообщением
     chat_id, thread_id = await _stats_target()
     if not chat_id:
         return
-    text = f"🗑 Удалена запись\n\nID: <code>#{report_id}</code>"
+
+    # 1) Обновляем "закреплённое" сообщение отчёта (если было), чтобы было видно что запись удалена
+    if prev:
+        p_chat, _, p_msg, _ = prev
+        try:
+            await bot.edit_message_text(chat_id=p_chat, message_id=p_msg, text=delete_text)
+            stat_save_msg(report_id, p_chat, (prev[1] or 0), p_msg, "deleted")
+            # 2) И отдельным сообщением объявляем удаление (чтобы это было заметно в чате)
+            if thread_id:
+                await bot.send_message(chat_id, delete_text, message_thread_id=thread_id)
+            else:
+                await bot.send_message(chat_id, delete_text)
+            return
+        except TelegramBadRequest:
+            prev = None
+
+    # Если не было предыдущего поста (или не смогли отредактировать) — просто публикуем
     if thread_id:
-        await bot.send_message(chat_id, text, message_thread_id=thread_id)
+        m = await bot.send_message(chat_id, delete_text, message_thread_id=thread_id)
     else:
-        await bot.send_message(chat_id, text)
+        m = await bot.send_message(chat_id, delete_text)
+    stat_save_msg(report_id, chat_id, thread_id or 0, m.message_id, "deleted")
 
 def days_keyboard() -> InlineKeyboardMarkup:
     # сегодня, -4 дня назад (всего 5 кнопок), вертикально
@@ -6400,6 +6500,7 @@ async def pick_hours(c: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("edit:del:"))
 async def cb_edit_delete(c: CallbackQuery):
     rid = int(c.data.split(":")[2])
+    before = get_report(rid)
     ok = delete_report(rid, c.from_user.id)
     if ok:
         await c.answer("Удалено")
@@ -6408,7 +6509,7 @@ async def cb_edit_delete(c: CallbackQuery):
     # Обновим сводку в статистике (если была удалена)
     if ok:
         try:
-            await stats_notify_deleted(bot, rid)
+            await stats_notify_deleted(bot, rid, deleted=before)
         except Exception:
             pass
     await cb_menu_edit(c)
@@ -6767,6 +6868,7 @@ async def cb_edit_hours_value(c: CallbackQuery, state: FSMContext):
         return
     
     rid = int(rid)
+    before = get_report(rid)
     # лимит 24
     already = sum_hours_for_user_date(c.from_user.id, work_d, exclude_report_id=rid)
     if already + new_h > 24:
@@ -6780,7 +6882,7 @@ async def cb_edit_hours_value(c: CallbackQuery, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, rid)
+            await stats_notify_changed(bot, rid, before=before)
         except Exception:
             pass
         await c.answer("Обновлено")
@@ -6821,6 +6923,7 @@ async def cb_edit_location_group(c: CallbackQuery, state: FSMContext):
 async def cb_edit_location_final(c: CallbackQuery, state: FSMContext):
     _, _, grp, loc, rid = c.data.split(":", 4)
     rid = int(rid)
+    before = get_report(rid)
     
     # Обновляем локацию
     grp_name = GROUP_FIELDS if grp == "fields" else GROUP_WARE
@@ -6834,7 +6937,7 @@ async def cb_edit_location_final(c: CallbackQuery, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, rid)
+            await stats_notify_changed(bot, rid, before=before)
         except Exception:
             pass
         await c.answer("Локация обновлена")
@@ -6888,6 +6991,7 @@ async def cb_edit_activity_final(c: CallbackQuery, state: FSMContext):
                                 [InlineKeyboardButton(text="🔙 Назад", callback_data=f"edit:actgrp:{grp}:{rid}")]
                             ]))
     else:
+        before = get_report(rid)
         # Обновляем активность
         grp_name = GROUP_TECH if grp == "tech" else GROUP_HAND
         ok = update_report_activity(rid, c.from_user.id, act, grp_name)
@@ -6900,7 +7004,7 @@ async def cb_edit_activity_final(c: CallbackQuery, state: FSMContext):
             else:
                 await state.clear()
             try:
-                await stats_notify_changed(bot, rid)
+                await stats_notify_changed(bot, rid, before=before)
             except Exception:
                 pass
             await c.answer("Вид работы обновлен")
@@ -6932,6 +7036,7 @@ async def cb_edit_custom_activity(message: Message, state: FSMContext):
     
     # Обновляем активность
     grp_name = GROUP_TECH if grp == "tech" else GROUP_HAND
+    before = get_report(int(rid))
     ok = update_report_activity(rid, message.from_user.id, act_name, grp_name)
     
     if ok:
@@ -6941,7 +7046,7 @@ async def cb_edit_custom_activity(message: Message, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, rid)
+            await stats_notify_changed(bot, int(rid), before=before)
         except Exception:
             pass
         if queue_active:
@@ -6966,6 +7071,7 @@ async def cb_edit_machine(message: Message, state: FSMContext):
     parts = text.split()
     machine_type = parts[0]
     machine_name = " ".join(parts[1:]) if len(parts) > 1 else None
+    before = get_report(int(rid))
     ok = update_report_machine(int(rid), message.from_user.id, machine_type, machine_name)
     if ok:
         queue_active = data.get("edit_queue_active")
@@ -6974,7 +7080,7 @@ async def cb_edit_machine(message: Message, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, int(rid))
+            await stats_notify_changed(bot, int(rid), before=before)
         except Exception:
             pass
         if queue_active:
@@ -6996,6 +7102,7 @@ async def cb_edit_crop(message: Message, state: FSMContext):
     if not crop:
         await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Введите название культуры.")
         return
+    before = get_report(int(rid))
     ok = update_report_crop(int(rid), message.from_user.id, crop)
     if ok:
         queue_active = data.get("edit_queue_active")
@@ -7004,7 +7111,7 @@ async def cb_edit_crop(message: Message, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, int(rid))
+            await stats_notify_changed(bot, int(rid), before=before)
         except Exception:
             pass
         if queue_active:
@@ -7027,6 +7134,7 @@ async def cb_edit_trips(message: Message, state: FSMContext):
     except ValueError:
         await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Введите количество рейсов числом.")
         return
+    before = get_report(int(rid))
     ok = update_report_trips(int(rid), message.from_user.id, trips)
     if ok:
         queue_active = data.get("edit_queue_active")
@@ -7035,7 +7143,7 @@ async def cb_edit_trips(message: Message, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, int(rid))
+            await stats_notify_changed(bot, int(rid), before=before)
         except Exception:
             pass
         if queue_active:
@@ -7065,6 +7173,7 @@ async def cb_edit_date(message: Message, state: FSMContext):
     if not new_date:
         await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Неверный формат даты. Используйте ГГГГ-ММ-ДД или ДД.ММ.ГГ.")
         return
+    before = get_report(int(rid))
     ok = update_report_date(int(rid), message.from_user.id, new_date)
     if ok:
         queue_active = data.get("edit_queue_active")
@@ -7073,7 +7182,7 @@ async def cb_edit_date(message: Message, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, int(rid))
+            await stats_notify_changed(bot, int(rid), before=before)
         except Exception:
             pass
         if queue_active:
