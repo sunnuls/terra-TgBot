@@ -97,7 +97,8 @@ def _read_git_short_sha(repo_dir: Path) -> Optional[str]:
 
 def _runtime_version_info(user_id: int, username: Optional[str]) -> str:
     repo_dir = Path(__file__).resolve().parent
-    sha = os.getenv("GIT_SHA", "").strip() or _read_git_short_sha(repo_dir) or "unknown"
+    # Prefer the actual working tree SHA when `.git` is available; env var can be stale.
+    sha = _read_git_short_sha(repo_dir) or os.getenv("GIT_SHA", "").strip() or "unknown"
     try:
         mtime = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
