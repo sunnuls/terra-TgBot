@@ -1783,11 +1783,28 @@ class BrigFSM(StatesGroup):
 # Вспомогалки: одно-сообщение и проверки
 # -----------------------------
 
-MAIN_MENU_TEXT = (
-    "🧰 <b>Главное меню</b>\n\n"
-    "Нажимайте кнопки ниже.\n"
-    "Ответы и подменю появляются в сообщении под этим меню."
-)
+def _ui_main_menu_text(user_id: int) -> str:
+    """
+    Текст статичного главного меню (1-е сообщение).
+    Делаем "как было" и с разным текстом по ролям.
+    """
+    u = get_user(user_id) or {}
+    name = (u.get("full_name") or "—").strip() or "—"
+    role = get_role_label(user_id)
+    role_suffix = " (бригадир)" if role == "brigadier" else (" (админ)" if role == "admin" else "")
+    text = (
+        f"👋 Привет, <b>{name}</b>{role_suffix}!\n\n"
+        "Выберите действие:"
+    )
+    if role in ("it", "admin"):
+        text += (
+            "\n\nДоступные команды:\n"
+            "• admin — админ-меню\n"
+            "• brig — меню бригадиров\n"
+            "• it — IT-меню\n"
+            "• menu — основное меню"
+        )
+    return text
 
 # быстрый кэш ui_state (chat_id, user_id) -> {"menu": int|None, "content": int|None}
 _ui_cache: Dict[Tuple[int, int], dict] = {}
@@ -1856,16 +1873,31 @@ async def _ui_ensure_main_menu(bot: Bot, chat_id: int, user_id: int) -> int:
     target_chat_id, extra = _ui_route_kwargs(chat_id)
     state = _ui_get_state(target_chat_id, user_id)
     menu_id = state.get("menu")
+    desired_text = _ui_main_menu_text(user_id)
 
     if menu_id:
         try:
-            # Важно: не трогаем текст (чтобы не упираться в ограничения редактирования текста),
-            # обновляем только клавиатуру под роль.
-            await bot.edit_message_reply_markup(
-                chat_id=target_chat_id,
-                message_id=menu_id,
-                reply_markup=main_menu_kb(role),
-            )
+            # Пытаемся синхронизировать текст+клавиатуру. Если текст нельзя редактировать —
+            # тихо обновим только клавиатуру, НЕ пересоздавая сообщение.
+            try:
+                await bot.edit_message_text(
+                    chat_id=target_chat_id,
+                    message_id=menu_id,
+                    text=desired_text,
+                    reply_markup=main_menu_kb(role),
+                    disable_web_page_preview=True,
+                )
+            except TelegramBadRequest as e2:
+                if "message is not modified" in str(e2).lower():
+                    pass
+                elif "message can't be edited" in str(e2).lower() or "message is too old" in str(e2).lower():
+                    await bot.edit_message_reply_markup(
+                        chat_id=target_chat_id,
+                        message_id=menu_id,
+                        reply_markup=main_menu_kb(role),
+                    )
+                else:
+                    raise
             return int(menu_id)
         except TelegramBadRequest as e:
             if "message is not modified" in str(e).lower():
@@ -1880,7 +1912,7 @@ async def _ui_ensure_main_menu(bot: Bot, chat_id: int, user_id: int) -> int:
 
     msg = await bot.send_message(
         target_chat_id,
-        MAIN_MENU_TEXT,
+        desired_text,
         reply_markup=main_menu_kb(role),
         disable_web_page_preview=True,
         **extra,
