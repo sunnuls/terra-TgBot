@@ -28,11 +28,24 @@ jobs:
           ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "
             set -e
             cd \"$WORKDIR\"
+            echo '--- deploy context ---'
+            echo \"WORKDIR=$WORKDIR\"
+            pwd
+            ls -la | head -n 80
+            echo '--- systemd unit (effective) ---'
+            systemctl show -p FragmentPath,DropInPaths,WorkingDirectory,ExecStart bot_polya || true
+            systemctl cat bot_polya --no-pager || true
+            echo '--- git repo check ---'
+            test -d .git || (echo 'ERROR: WORKDIR is not a git repo (no .git). Check WORKDIR secret vs server path.' && exit 2)
             git pull --rebase
             echo '--- server repo ---'
             pwd
             export GIT_SHA=$(git rev-parse --short HEAD)
             echo \"GIT_SHA=$GIT_SHA\"
+            echo '--- write GIT_SHA into .env (for /version) ---'
+            touch .env
+            (grep -v '^GIT_SHA=' .env || true; echo \"GIT_SHA=$GIT_SHA\") > .env.tmp
+            mv .env.tmp .env
             git log -1 --oneline
             echo '--- precheck systemd ---'
             whoami
