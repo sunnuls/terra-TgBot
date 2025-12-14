@@ -7408,7 +7408,7 @@ async def adm_export(c: CallbackQuery):
 
 # -------------- Фолбэк на текст вне ожиданий --------------
 
-@router.message(F.text)
+@router.message(StateFilter(None), F.text)
 async def any_text(message: Message):
     u = get_user(message.from_user.id)
     await show_main_menu(message.chat.id, message.from_user.id, u, "Меню")
