@@ -382,6 +382,18 @@ def init_db():
         )
         """)
 
+        # таблица для хранения message_id UI (2 сообщения: главное меню + контент)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS ui_state(
+          chat_id            INTEGER,
+          user_id            INTEGER,
+          menu_message_id    INTEGER,
+          content_message_id INTEGER,
+          updated_at         TEXT,
+          PRIMARY KEY (chat_id, user_id)
+        )
+        """)
+
         # таблица для отслеживания экспортов в Google Sheets
         c.execute("""
         CREATE TABLE IF NOT EXISTS google_exports(
@@ -1771,8 +1783,153 @@ class BrigFSM(StatesGroup):
 # Вспомогалки: одно-сообщение и проверки
 # -----------------------------
 
-# где хранить последнее сообщение (chat_id, user_id) -> message_id
-last_message: Dict[Tuple[int, int], int] = {}
+MAIN_MENU_TEXT = (
+    "🧰 <b>Главное меню</b>\n\n"
+    "Нажимайте кнопки ниже.\n"
+    "Ответы и подменю появляются в сообщении под этим меню."
+)
+
+# быстрый кэш ui_state (chat_id, user_id) -> {"menu": int|None, "content": int|None}
+_ui_cache: Dict[Tuple[int, int], dict] = {}
+
+async def _ui_try_delete_user_message(message: Message) -> None:
+    """
+    Best-effort cleanup: tries to delete user's text input to keep the chat cleaner.
+    Safe to call anywhere; failures are ignored.
+    """
+    try:
+        await message.delete()
+    except (TelegramBadRequest, TelegramForbiddenError):
+        pass
+    except Exception:
+        pass
+
+def _ui_get_state(chat_id: int, user_id: int) -> dict:
+    key = (chat_id, user_id)
+    cached = _ui_cache.get(key)
+    if cached is not None:
+        return cached
+    with connect() as con, closing(con.cursor()) as c:
+        row = c.execute(
+            "SELECT menu_message_id, content_message_id FROM ui_state WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id),
+        ).fetchone()
+    state = {"menu": (row[0] if row else None), "content": (row[1] if row else None)}
+    _ui_cache[key] = state
+    return state
+
+def _ui_save_state(chat_id: int, user_id: int, *, menu: Optional[int] = None, content: Optional[int] = None) -> None:
+    now = datetime.now().isoformat()
+    prev = _ui_get_state(chat_id, user_id)
+    new_menu = menu if menu is not None else prev.get("menu")
+    new_content = content if content is not None else prev.get("content")
+    with connect() as con, closing(con.cursor()) as c:
+        c.execute(
+            """
+            INSERT INTO ui_state(chat_id, user_id, menu_message_id, content_message_id, updated_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET
+              menu_message_id=excluded.menu_message_id,
+              content_message_id=excluded.content_message_id,
+              updated_at=excluded.updated_at
+            """,
+            (chat_id, user_id, new_menu, new_content, now),
+        )
+        con.commit()
+    _ui_cache[(chat_id, user_id)] = {"menu": new_menu, "content": new_content}
+
+async def _ui_ensure_main_menu(bot: Bot, chat_id: int, user_id: int) -> int:
+    """
+    Гарантирует наличие первого (статичного) сообщения с главным меню.
+    Возвращает message_id сообщения меню.
+    """
+    init_db()
+    role = get_role_label(user_id)
+    target_chat_id, extra = _ui_route_kwargs(chat_id)
+    state = _ui_get_state(target_chat_id, user_id)
+    menu_id = state.get("menu")
+
+    if menu_id:
+        try:
+            # проверка "живое ли" сообщение + при необходимости обновим клавиатуру под роль
+            await bot.edit_message_reply_markup(
+                chat_id=target_chat_id,
+                message_id=menu_id,
+                reply_markup=main_menu_kb(role),
+            )
+            return int(menu_id)
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                return int(menu_id)
+            if "message to edit not found" in str(e).lower():
+                menu_id = None
+                _ui_save_state(target_chat_id, user_id, menu=None)
+
+    msg = await bot.send_message(
+        target_chat_id,
+        MAIN_MENU_TEXT,
+        reply_markup=main_menu_kb(role),
+        disable_web_page_preview=True,
+        **extra,
+    )
+    _ui_save_state(target_chat_id, user_id, menu=msg.message_id)
+    return msg.message_id
+
+async def _ui_edit_content(
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> int:
+    """
+    Редактирует/создаёт второе сообщение (контент/подменю). Всегда целимся только в него.
+    Возвращает message_id контент-сообщения.
+    """
+    init_db()
+    target_chat_id, extra = _ui_route_kwargs(chat_id)
+
+    # 1) убедимся, что главное меню есть (чтобы схема "2 сообщения" сохранялась)
+    await _ui_ensure_main_menu(bot, chat_id, user_id)
+
+    state = _ui_get_state(target_chat_id, user_id)
+    content_id = state.get("content")
+    if content_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=target_chat_id,
+                message_id=content_id,
+                text=text,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
+            return int(content_id)
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                return int(content_id)
+            if "message to edit not found" in str(e).lower():
+                content_id = None
+                _ui_save_state(target_chat_id, user_id, content=None)
+
+    # 2) если нет/не редактируется — отправим новый контент ниже меню
+    msg = await bot.send_message(
+        target_chat_id,
+        text,
+        reply_markup=reply_markup,
+        disable_web_page_preview=True,
+        **extra,
+    )
+
+    # попробуем подчистить "старый контент", если он был (чтобы стремиться к 2 сообщениям)
+    old_content = state.get("content")
+    if old_content and old_content != msg.message_id:
+        try:
+            await bot.delete_message(target_chat_id, old_content)
+        except TelegramBadRequest:
+            pass
+
+    _ui_save_state(target_chat_id, user_id, content=msg.message_id)
+    return msg.message_id
 
 def _ui_route_kwargs(current_chat_id: int) -> tuple[int, dict]:
     """
@@ -1861,55 +2018,14 @@ async def _notify_user(bot: Bot, user_id: int, text: str) -> None:
         pass
 
 async def _edit_or_send(bot: Bot, chat_id: int, user_id: int, text: str, reply_markup: Optional[InlineKeyboardMarkup]=None):
-    target_chat_id, extra = _ui_route_kwargs(chat_id)
-    key = (target_chat_id, user_id)
-    mid = last_message.get(key)
-    if mid:
-        try:
-            await bot.edit_message_text(
-                chat_id=target_chat_id,
-                message_id=mid,
-                text=text,
-                reply_markup=reply_markup,
-                disable_web_page_preview=True,
-            )
-            return
-        except TelegramBadRequest as e:
-            # Если содержимое не изменилось — не создаём новое сообщение
-            if "message is not modified" in str(e).lower():
-                return
-            # Если сообщение не найдено или не может быть отредактировано — удаляем из кэша и создаем новое
-            if "message to edit not found" in str(e).lower() or "message is not modified" in str(e).lower():
-                del last_message[key]
-            # Иначе попробуем отправить новое ниже
-            pass
-    # Если нет прошлого сообщения — отправим в нужное место (учтём подтему)
-    m = await bot.send_message(target_chat_id, text, reply_markup=reply_markup, **extra)
-    last_message[key] = m.message_id
+    await _ui_edit_content(bot, chat_id, user_id, text, reply_markup=reply_markup)
 
 async def _send_new_message(bot: Bot, chat_id: int, user_id: int, text: str, reply_markup: Optional[InlineKeyboardMarkup]=None):
-    """Отправляет новое сообщение, удаляя предыдущее"""
-    target_chat_id, extra = _ui_route_kwargs(chat_id)
-    key = (target_chat_id, user_id)
-    mid = last_message.get(key)
-    
-    print(f"[DEBUG] _send_new_message: key={key}, old_mid={mid}")
-    
-    # Отправляем новое сообщение
-    m = await bot.send_message(target_chat_id, text, reply_markup=reply_markup, **extra)
-    last_message[key] = m.message_id
-    
-    print(f"[DEBUG] _send_new_message: new_mid={m.message_id}")
-    
-    # Удаляем предыдущее сообщение если оно есть (после отправки нового)
-    if mid and mid != m.message_id:
-        try:
-            print(f"[DEBUG] _send_new_message: deleting old message {mid}")
-            await bot.delete_message(target_chat_id, mid)
-            print(f"[DEBUG] _send_new_message: successfully deleted {mid}")
-        except TelegramBadRequest as e:
-            print(f"[DEBUG] _send_new_message: failed to delete {mid}: {e}")
-            pass  # Игнорируем ошибки удаления
+    """
+    В новой схеме UI сообщений всегда два (главное меню + контент).
+    Поэтому вместо "послать новое и удалить старое" — просто редактируем контент.
+    """
+    await _ui_edit_content(bot, chat_id, user_id, text, reply_markup=reply_markup)
 
 def reply_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -2799,13 +2915,14 @@ async def cmd_start(message: Message, state: FSMContext):
     
     if not u or not (u.get("full_name") or "").strip():
         await state.set_state(NameFSM.waiting_name)
-        await message.answer(
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
             "👋 Для начала введите <b>Фамилию Имя</b> (например: <b>Иванов Иван</b>).",
-            reply_markup=reply_menu_kb()
         )
         return
-    
-    await message.answer("Добро пожаловать! Нажмите «🧰 Меню» внизу для действий.", reply_markup=reply_menu_kb())
+
     await show_main_menu(message.chat.id, message.from_user.id, u, "Готово. Выберите пункт меню.")
 
 @router.message(Command("today"))
@@ -2850,7 +2967,12 @@ async def cmd_menu(message: Message, state: FSMContext):
     u = get_user(message.from_user.id)
     if not u or not (u.get("full_name") or "").strip():
         await state.set_state(NameFSM.waiting_name)
-        await message.answer("Введите <b>Фамилию Имя</b> для регистрации (например: <b>Иванов Иван</b>).")
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Введите <b>Фамилию Имя</b> для регистрации (например: <b>Иванов Иван</b>).",
+        )
         return
     
     # Стараемся удалить команду пользователя, чтобы не плодить мусор
@@ -2859,15 +2981,7 @@ async def cmd_menu(message: Message, state: FSMContext):
     except TelegramBadRequest:
         pass
     
-    # Показываем inline меню
-    name = u.get("full_name")
-    role = get_role_label(message.from_user.id)
-    role_suffix = " (бригадир)" if role == "brigadier" else (" (админ)" if role == "admin" else "")
-    text = f"👋 Привет, <b>{name}</b>{role_suffix}!\n\nВыберите действие:"
-    await message.answer(text, reply_markup=main_menu_kb(role))
-    
-    # Устанавливаем постоянную клавиатуру
-    # Убираем отправку сообщения "Меню открыто" - оно не нужно
+    await show_main_menu(message.chat.id, message.from_user.id, u, "Меню")
 
 @router.message(Command("it"))
 async def cmd_it_menu(message: Message):
@@ -2972,15 +3086,7 @@ async def msg_persistent_menu(message: Message, state: FSMContext):
     except TelegramBadRequest:
         pass
     
-    # Показываем inline меню
-    name = u.get("full_name")
-    role = get_role_label(message.from_user.id)
-    role_suffix = " (бригадир)" if role == "brigadier" else (" (админ)" if role == "admin" else "")
-    text = f"👋 Привет, <b>{name}</b>{role_suffix}!\n\nВыберите действие:"
-    await message.answer(text, reply_markup=main_menu_kb(role))
-    
-    # Устанавливаем постоянную клавиатуру
-    # Убираем отправку сообщения "Меню открыто" - оно не нужно
+    await show_main_menu(message.chat.id, message.from_user.id, u, "Меню")
 
 # Удалены лишние обработчики кнопок постоянной клавиатуры
 
@@ -2993,7 +3099,10 @@ async def capture_full_name(message: Message, state: FSMContext):
     from_settings = data.get("name_change_from_settings")
     back_cb = "menu:name" if from_settings else "menu:root"
     if len(text) < 3 or " " not in text:
-        await message.answer(
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
             "Введите Фамилию и Имя (через пробел). Пример: <b>Иванов Иван</b>",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Назад", callback_data=back_cb)]
@@ -3012,7 +3121,6 @@ async def capture_full_name(message: Message, state: FSMContext):
     
     if is_new_user:
         # Первоначальная регистрация
-        await message.answer("Отлично! Внизу у вас закреплена кнопка «🧰 Меню».", reply_markup=reply_menu_kb())
         await show_main_menu(message.chat.id, message.from_user.id, u, f"✅ Зарегистрировано как: <b>{text}</b>")
     else:
         # Изменение имени — возвращаем в главное меню
@@ -3052,17 +3160,9 @@ async def show_main_menu(chat_id:int, user_id:int, u:dict, header:str):
             "• menu — основное меню"
         )
     
-    # Отправляем сообщение с постоянной клавиатурой
-    target_chat_id, extra = _ui_route_kwargs(chat_id)
-    await bot.send_message(
-        target_chat_id, 
-        text, 
-        reply_markup=main_menu_kb(role),
-        **extra
-    )
-    
-    # Отправляем отдельное сообщение с постоянной клавиатурой для обеспечения совместимости
-    # Убираем отправку сообщения "Меню открыто" - оно не нужно
+    # В новой схеме меню — отдельным (статичным) сообщением, а этот экран рисуем в "контент"
+    await _ui_ensure_main_menu(bot, chat_id, user_id)
+    await _ui_edit_content(bot, chat_id, user_id, text, reply_markup=None)
 
 async def show_settings_menu(bot: Bot, chat_id:int, user_id:int, header:str="Здесь вы можете сменить ФИО."):
     await _edit_or_send(bot, chat_id, user_id, header, reply_markup=settings_menu_kb())
@@ -3177,20 +3277,15 @@ async def cb_menu_root(c: CallbackQuery, state: FSMContext):
     
     u = get_user(c.from_user.id)
     
-    # Генерируем текст и клавиатуру главного меню
-    class Dummy: pass
-    dummy = Dummy()
-    dummy.from_user = Dummy()
-    dummy.from_user.id = c.from_user.id
-    dummy.from_user.username = (u or {}).get("username")
-    role = get_role_label(c.from_user.id)
-    
     name = (u or {}).get("full_name") or "—"
+    role = get_role_label(c.from_user.id)
     role_suffix = " (бригадир)" if role == "brigadier" else (" (админ)" if role == "admin" else "")
-    text = f"👋 Привет, <b>{name}</b>{role_suffix}!\n\nВыберите действие:"
-    
-    # Создаем новое сообщение, удаляя предыдущее
-    await _send_new_message(c.bot, c.message.chat.id, c.from_user.id, text, reply_markup=main_menu_kb(role))
+    await show_main_menu(
+        c.message.chat.id,
+        c.from_user.id,
+        u or {},
+        f"👋 Привет, <b>{name}</b>{role_suffix}!\n\nВыберите действие:",
+    )
 
 # Обработчик кнопки Start удален - теперь обычные пользователи сразу видят полное меню
 
@@ -3414,14 +3509,22 @@ async def otd_pick_hours_cb(c: CallbackQuery, state: FSMContext):
 
 @router.message(OtdFSM.pick_hours)
 async def otd_pick_hours_msg(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     try:
         hours = int((message.text or "").strip())
     except ValueError:
-        await message.answer("Введите число часов (1-24) или нажмите кнопку.")
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Введите число часов (1-24) или нажмите кнопку.",
+            reply_markup=otd_hours_keyboard(),
+        )
         return
     ok, alert = await _otd_set_hours(message.bot, message.chat.id, message.from_user.id, state, hours)
+    # _otd_set_hours already updates the content message; don't send extra messages.
     if alert and not ok:
-        await message.answer(alert)
+        return
 
 @router.callback_query(F.data.startswith("otd:type:"))
 async def otd_pick_type(c: CallbackQuery, state: FSMContext):
@@ -3522,9 +3625,18 @@ async def otd_pick_machine_name(c: CallbackQuery, state: FSMContext):
 
 @router.message(OtdFSM.pick_machine_custom)
 async def otd_pick_machine_custom(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     text = (message.text or "").strip()
     if not text:
-        await message.answer("Введите технику.")
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Введите технику.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:mkind")]
+            ]),
+        )
         return
     data = await state.get_data()
     work = data.get("otd", {})
@@ -3534,7 +3646,8 @@ async def otd_pick_machine_custom(message: Message, state: FSMContext):
     work["machine_name"] = text
     await state.update_data(otd=work)
     await state.set_state(OtdFSM.pick_activity)
-    await message.answer("Вид деятельности техники:", reply_markup=otd_tractor_work_kb())
+    await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
+                        "Вид деятельности техники:", reply_markup=otd_tractor_work_kb())
 
 @router.callback_query(F.data.startswith("otd:twork:"))
 async def otd_pick_twork(c: CallbackQuery, state: FSMContext):
@@ -3664,9 +3777,18 @@ async def otd_back_loccustom(c: CallbackQuery, state: FSMContext):
 
 @router.message(OtdFSM.pick_location)
 async def otd_pick_location_custom(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     loc = (message.text or "").strip()
     if not loc:
-        await message.answer("Введите значение текстом.")
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Введите значение текстом.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:loccustom")]
+            ]),
+        )
         return
     data = await state.get_data()
     work = data.get("otd", {})
@@ -4075,9 +4197,18 @@ async def brig_pick_machine_name(c: CallbackQuery, state: FSMContext):
 
 @router.message(BrigFSM.pick_machine_name_custom)
 async def brig_pick_machine_name_custom(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     name = (message.text or "").strip()
     if not name:
-        await message.answer("Название не может быть пустым")
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Название не может быть пустым",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:mkind")]
+            ]),
+        )
         return
     data = await state.get_data()
     brig = data.get("brig", {})
@@ -4149,9 +4280,18 @@ async def brig_back_mact(c: CallbackQuery, state: FSMContext):
 
 @router.message(BrigFSM.pick_machine_activity_custom)
 async def brig_pick_machine_activity_custom(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     act = (message.text or "").strip()
     if not act:
-        await message.answer("Поле не может быть пустым")
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Значение не может быть пустым",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:mact")]
+            ]),
+        )
         return
     data = await state.get_data()
     brig = data.get("brig", {})
@@ -4216,9 +4356,18 @@ async def brig_back_mcrop(c: CallbackQuery, state: FSMContext):
 
 @router.message(BrigFSM.pick_machine_crop_custom)
 async def brig_pick_machine_crop_custom(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     crop = (message.text or "").strip()
     if not crop:
-        await message.answer("Культура не может быть пустой")
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Культура не может быть пустой",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:mcrop")]
+            ]),
+        )
         return
     data = await state.get_data()
     brig = data.get("brig", {})
@@ -4281,19 +4430,33 @@ async def brig_back_kcrop(c: CallbackQuery, state: FSMContext):
 
 @router.message(BrigFSM.pick_kamaz_crop_custom)
 async def brig_kamaz_crop_custom(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     crop = (message.text or "").strip()
     if not crop:
-        await message.answer("Культура не может быть пустой")
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Культура не может быть пустой",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:kcrop")]
+            ]),
+        )
         return
     data = await state.get_data()
     brig = data.get("brig", {})
     brig["machine_crop"] = crop
     await state.update_data(brig=brig)
     await state.set_state(BrigFSM.pick_kamaz_trips)
-    await message.answer("Сколько рейсов?",
-                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                             [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:kcrop")]
-                         ]))
+    await _edit_or_send(
+        message.bot,
+        message.chat.id,
+        message.from_user.id,
+        "Сколько рейсов?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:kcrop")]
+        ]),
+    )
 
 @router.message(BrigFSM.pick_kamaz_trips)
 async def brig_kamaz_trips(message: Message, state: FSMContext):
@@ -4384,9 +4547,18 @@ async def brig_back_kload(c: CallbackQuery, state: FSMContext):
 
 @router.message(BrigFSM.pick_kamaz_load_custom)
 async def brig_kamaz_load_custom(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     load = (message.text or "").strip()
     if not load:
-        await message.answer("Место не может быть пустым")
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Место не может быть пустым",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:kload")]
+            ]),
+        )
         return
     data = await state.get_data()
     brig = data.get("brig", {})
@@ -4459,9 +4631,18 @@ async def brig_back_crop(c: CallbackQuery, state: FSMContext):
 
 @router.message(BrigFSM.pick_crop_custom)
 async def brig_pick_crop_custom(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     crop = (message.text or "").strip()
     if not crop:
-        await message.answer("Культура не может быть пустой")
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Культура не может быть пустой",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:crop")]
+            ]),
+        )
         return
     data = await state.get_data()
     brig = data.get("brig", {})
@@ -4469,10 +4650,15 @@ async def brig_pick_crop_custom(message: Message, state: FSMContext):
     brig["crop"] = crop
     await state.update_data(brig=brig)
     await state.set_state(BrigFSM.pick_workers)
-    await message.answer("Сколько людей работало?",
-                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                             [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:crop")]
-                         ]))
+    await _edit_or_send(
+        message.bot,
+        message.chat.id,
+        message.from_user.id,
+        "Сколько людей работало?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:crop")]
+        ]),
+    )
 
 @router.callback_query(F.data.startswith("brig:act:"))
 async def brig_pick_activity(c: CallbackQuery, state: FSMContext):
@@ -4501,12 +4687,18 @@ async def brig_pick_activity(c: CallbackQuery, state: FSMContext):
 
 @router.message(BrigFSM.pick_activity_custom)
 async def brig_pick_activity_custom(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     act = (message.text or "").strip()
     if not act:
-        await message.answer("Поле не может быть пустым",
-                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                 [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:activity")]
-                             ]))
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Значение не может быть пустым",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="brig:back:activity")]
+            ]),
+        )
         return
     data = await state.get_data()
     brig = data.get("brig", {})
@@ -4788,7 +4980,7 @@ async def brig_pick_field(message: Message, state: FSMContext):
         kb.button(text="🔙 Назад", callback_data="brig:confirm:back")
         kb.button(text="❌ Отмена", callback_data="brig:confirm:cancel")
         kb.adjust(2,1)
-        await message.answer(summary, reply_markup=kb.as_markup())
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, summary, reply_markup=kb.as_markup())
 
 @router.callback_query(F.data == "brig:back:field")
 async def brig_back_field(c: CallbackQuery, state: FSMContext):
@@ -6652,17 +6844,18 @@ async def cb_edit_activity_final(c: CallbackQuery, state: FSMContext):
 # Обработчик ввода кастомной активности
 @router.message(EditFSM.waiting_new_activity)
 async def cb_edit_custom_activity(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     data = await state.get_data()
     rid = data.get("edit_id")
     grp = data.get("edit_grp")
     
     if not rid or not grp:
-        await message.answer("Ошибка: данные не найдены. Начните заново.")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Ошибка: данные не найдены. Начните заново.")
         return
     
     act_name = (message.text or "").strip()
     if not act_name:
-        await message.answer("Введите название работы.")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Введите название работы.")
         return
     
     # Обновляем активность
@@ -6679,24 +6872,24 @@ async def cb_edit_custom_activity(message: Message, state: FSMContext):
             await stats_notify_changed(bot, rid)
         except Exception:
             pass
-        await message.answer("Вид работы обновлен")
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
             await cb_menu_edit_from_message(message)
     else:
-        await message.answer("Не получилось обновить вид работы")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Не получилось обновить вид работы")
 
 @router.message(EditFSM.waiting_new_machine)
 async def cb_edit_machine(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     data = await state.get_data()
     rid = data.get("edit_id")
     if not rid:
-        await message.answer("Ошибка: данные не найдены. Начните заново.")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Ошибка: данные не найдены. Начните заново.")
         return
     text = (message.text or "").strip()
     if not text:
-        await message.answer("Введите технику, например: Трактор JD8")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Введите технику, например: Трактор JD8")
         return
     parts = text.split()
     machine_type = parts[0]
@@ -6712,24 +6905,24 @@ async def cb_edit_machine(message: Message, state: FSMContext):
             await stats_notify_changed(bot, int(rid))
         except Exception:
             pass
-        await message.answer("Техника обновлена")
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
             await cb_menu_edit_from_message(message)
     else:
-        await message.answer("Не получилось обновить технику")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Не получилось обновить технику")
 
 @router.message(EditFSM.waiting_new_crop)
 async def cb_edit_crop(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     data = await state.get_data()
     rid = data.get("edit_id")
     if not rid:
-        await message.answer("Ошибка: данные не найдены. Начните заново.")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Ошибка: данные не найдены. Начните заново.")
         return
     crop = (message.text or "").strip()
     if not crop:
-        await message.answer("Введите название культуры.")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Введите название культуры.")
         return
     ok = update_report_crop(int(rid), message.from_user.id, crop)
     if ok:
@@ -6742,25 +6935,25 @@ async def cb_edit_crop(message: Message, state: FSMContext):
             await stats_notify_changed(bot, int(rid))
         except Exception:
             pass
-        await message.answer("Культура обновлена")
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
             await cb_menu_edit_from_message(message)
     else:
-        await message.answer("Не получилось обновить культуру")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Не получилось обновить культуру")
 
 @router.message(EditFSM.waiting_new_trips)
 async def cb_edit_trips(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     data = await state.get_data()
     rid = data.get("edit_id")
     if not rid:
-        await message.answer("Ошибка: данные не найдены. Начните заново.")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Ошибка: данные не найдены. Начните заново.")
         return
     try:
         trips = int((message.text or "").strip())
     except ValueError:
-        await message.answer("Введите количество рейсов числом.")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Введите количество рейсов числом.")
         return
     ok = update_report_trips(int(rid), message.from_user.id, trips)
     if ok:
@@ -6773,20 +6966,20 @@ async def cb_edit_trips(message: Message, state: FSMContext):
             await stats_notify_changed(bot, int(rid))
         except Exception:
             pass
-        await message.answer("Количество рейсов обновлено")
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
             await cb_menu_edit_from_message(message)
     else:
-        await message.answer("Не получилось обновить рейсы")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Не получилось обновить рейсы")
 
 @router.message(EditFSM.waiting_new_date)
 async def cb_edit_date(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
     data = await state.get_data()
     rid = data.get("edit_id")
     if not rid:
-        await message.answer("Ошибка: данные не найдены. Начните заново.")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Ошибка: данные не найдены. Начните заново.")
         return
     raw = (message.text or "").strip()
     new_date = None
@@ -6798,7 +6991,7 @@ async def cb_edit_date(message: Message, state: FSMContext):
         except Exception:
             pass
     if not new_date:
-        await message.answer("Неверный формат даты. Используйте ГГГГ-ММ-ДД или ДД.ММ.ГГ.")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Неверный формат даты. Используйте ГГГГ-ММ-ДД или ДД.ММ.ГГ.")
         return
     ok = update_report_date(int(rid), message.from_user.id, new_date)
     if ok:
@@ -6811,19 +7004,18 @@ async def cb_edit_date(message: Message, state: FSMContext):
             await stats_notify_changed(bot, int(rid))
         except Exception:
             pass
-        await message.answer("Дата обновлена")
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
             await cb_menu_edit_from_message(message)
     else:
-        await message.answer("Не получилось обновить дату")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Не получилось обновить дату")
 
 async def cb_menu_edit_from_message(message: Message):
     """Вспомогательная функция для возврата к меню редактирования из текстового сообщения"""
     rows = user_recent_24h_reports(message.from_user.id)
     if not rows:
-        await message.answer("📝 За последние 48 часов записей нет.")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "📝 За последние 48 часов записей нет.")
         return
     
     kb = InlineKeyboardBuilder()
@@ -6843,7 +7035,7 @@ async def cb_menu_edit_from_message(message: Message):
             InlineKeyboardButton(text=f"🗑 Удалить #{rid}", callback_data=f"edit:del:{rid}")
         )
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:root"))
-    await message.answer("\n".join(text), reply_markup=kb.as_markup())
+    await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "\n".join(text), reply_markup=kb.as_markup())
 
 # -------------- Админ: добавить/удалить --------------
 
@@ -6932,7 +7124,7 @@ async def adm_edit_name_value(message: Message, state: FSMContext):
     kind_id = data.get("edit_kind_id")
     new_name = (message.text or "").strip()
     if not new_name:
-        await message.answer("Название не может быть пустым. Введите снова.")
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id, "Название не может быть пустым. Введите снова.")
         return
 
     # Подтверждение изменения (без применения сразу)
@@ -6962,9 +7154,12 @@ async def adm_edit_name_value(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="✅ Подтвердить", callback_data="adm:confirm:edit")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb)]
     ])
-    await message.answer(
+    await _edit_or_send(
+        message.bot,
+        message.chat.id,
+        message.from_user.id,
         f"Подтвердить изменение?\n\n<b>{old_name}</b> → <b>{new_name}</b>",
-        reply_markup=kb
+        reply_markup=kb,
     )
 
 @router.callback_query(AdminFSM.edit_confirm, F.data == "adm:confirm:edit")
