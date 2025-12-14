@@ -2516,7 +2516,11 @@ def otd_crops_kb(*, kamaz: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     crops = KAMAZ_CARGO_LIST if kamaz else OTD_CROPS
     for c_name in crops:
-        kb.button(text=c_name, callback_data=f"otd:crop:{c_name}")
+        # "Прочее" должно вести на свободный ввод (а не сохраняться как значение)
+        if (c_name or "").strip() == "Прочее":
+            kb.button(text="Прочее…", callback_data="otd:crop:__other__")
+        else:
+            kb.button(text=c_name, callback_data=f"otd:crop:{c_name}")
     kb.adjust(2)
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:loc_or_work"))
     return kb.as_markup()
@@ -3443,12 +3447,16 @@ def _format_otd_summary(work: dict) -> str:
     lines.append(f"3. {machine_type}")
     machine_name = work.get("machine_name") or "—"
     lines.append(f"4. {machine_name}")
-    lines.append(f"5. Работа - {work.get('activity', '—')}")
-    lines.append(f"6. Культура - {work.get('crop', '—')}")
     location = work.get("location") or "—"
-    lines.append(f"7. Место - {location}")
+    # Для КамАЗа (machine_mode=single) "Работа" не выбирается — показываем груз вместо культуры.
     if work.get("machine_mode") == "single":
-        lines.append(f"8. Рейсов - {work.get('trips') or 0}")
+        lines.append(f"5. Груз - {work.get('crop', '—')}")
+        lines.append(f"6. Место погрузки - {location}")
+        lines.append(f"7. Рейсов - {work.get('trips') or 0}")
+    else:
+        lines.append(f"5. Работа - {work.get('activity', '—')}")
+        lines.append(f"6. Культура - {work.get('crop', '—')}")
+        lines.append(f"7. Место - {location}")
     return "\n".join(lines)
 
 def _format_otd_summary_with_title(work: dict, title: str) -> str:
@@ -3460,12 +3468,15 @@ def _format_otd_summary_with_title(work: dict, title: str) -> str:
     lines.append(f"3. {machine_type}")
     machine_name = work.get("machine_name") or "—"
     lines.append(f"4. {machine_name}")
-    lines.append(f"5. Работа - {work.get('activity', '—')}")
-    lines.append(f"6. Культура - {work.get('crop', '—')}")
     location = work.get("location") or "—"
-    lines.append(f"7. Место - {location}")
     if work.get("machine_mode") == "single":
-        lines.append(f"8. Рейсов - {work.get('trips') or 0}")
+        lines.append(f"5. Груз - {work.get('crop', '—')}")
+        lines.append(f"6. Место погрузки - {location}")
+        lines.append(f"7. Рейсов - {work.get('trips') or 0}")
+    else:
+        lines.append(f"5. Работа - {work.get('activity', '—')}")
+        lines.append(f"6. Культура - {work.get('crop', '—')}")
+        lines.append(f"7. Место - {location}")
     return "\n".join(lines)
 
 @router.callback_query(F.data == "menu:root")
@@ -3760,6 +3771,9 @@ async def otd_pick_machine_kind(c: CallbackQuery, state: FSMContext):
 
     if (mk.get("mode") or "list") == "single":
         work["machine_name"] = mk["title"]
+        # В режиме single (КамАЗ) "вид работы" не выбирается — ставим дефолт,
+        # чтобы запись в БД/статистике была консистентной.
+        work["activity"] = work.get("activity") or "КамАЗ"
         await state.update_data(otd=work)
         await state.set_state(OtdFSM.pick_crop)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
@@ -3978,7 +3992,7 @@ async def otd_pick_crop(c: CallbackQuery, state: FSMContext):
     crop = c.data.split(":", 2)[2]
     data = await state.get_data()
     work = data.get("otd", {})
-    if crop == "Прочее":
+    if crop == "__other__" or (crop or "").strip() == "Прочее":
         await state.set_state(OtdFSM.pick_crop_custom)
         await _edit_or_send(
             c.bot,
@@ -4176,10 +4190,19 @@ async def otd_edit_field(c: CallbackQuery, state: FSMContext):
 async def otd_confirm_ok(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     work = data.get("otd", {})
-    required = ("work_date", "hours", "activity", "crop")
-    if not all(work.get(k) for k in required):
-        await c.answer("Не все данные заполнены", show_alert=True)
-        return
+    # Для КамАЗа (machine_mode=single) нет выбора "Работа", поэтому activity не требуем.
+    if work.get("machine_mode") == "single":
+        if not work.get("work_date") or not work.get("hours") or not work.get("crop"):
+            await c.answer("Не все данные заполнены", show_alert=True)
+            return
+        if work.get("trips") is None or not (work.get("location") or "").strip():
+            await c.answer("Не все данные заполнены", show_alert=True)
+            return
+    else:
+        required = ("work_date", "hours", "activity", "crop")
+        if not all(work.get(k) for k in required):
+            await c.answer("Не все данные заполнены", show_alert=True)
+            return
     # проверка лимита часов
     already = sum_hours_for_user_date(c.from_user.id, work["work_date"])
     if already + int(work["hours"]) > 24:
