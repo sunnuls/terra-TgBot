@@ -21,7 +21,8 @@ jobs:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
           SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
-          WORKDIR: ${{ secrets.WORKDIR || '/root/terra-TgBot' }}
+          # Must match bot systemd WorkingDirectory/ExecStart path on the server (see bot_polya.service)
+          WORKDIR: ${{ secrets.WORKDIR || '/opt/bot' }}
         run: |
           set -euo pipefail
           ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "
@@ -37,7 +38,7 @@ jobs:
             whoami
             systemctl is-active bot_polya || true
             echo '--- update deps ---'
-            /root/terra-TgBot/venv/bin/pip install -r requirements.txt
+            \"$WORKDIR/venv/bin/python\" -m pip install -r requirements.txt
             echo '--- restart bot ---'
             systemctl restart bot_polya
             systemctl status bot_polya --no-pager | head -n 60
