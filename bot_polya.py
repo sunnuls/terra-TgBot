@@ -1804,6 +1804,11 @@ async def _ui_try_delete_user_message(message: Message) -> None:
     except Exception:
         pass
 
+def _ui_back_to_root_kb(text: str = "🧰 В меню") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=text, callback_data="menu:root")]]
+    )
+
 def _ui_get_state(chat_id: int, user_id: int) -> dict:
     key = (chat_id, user_id)
     cached = _ui_cache.get(key)
@@ -1851,17 +1856,23 @@ async def _ui_ensure_main_menu(bot: Bot, chat_id: int, user_id: int) -> int:
 
     if menu_id:
         try:
-            # проверка "живое ли" сообщение + при необходимости обновим клавиатуру под роль
-            await bot.edit_message_reply_markup(
+            # держим текст меню строго как MAIN_MENU_TEXT + обновляем клавиатуру под роль
+            await bot.edit_message_text(
                 chat_id=target_chat_id,
                 message_id=menu_id,
+                text=MAIN_MENU_TEXT,
                 reply_markup=main_menu_kb(role),
+                disable_web_page_preview=True,
             )
             return int(menu_id)
         except TelegramBadRequest as e:
             if "message is not modified" in str(e).lower():
                 return int(menu_id)
             if "message to edit not found" in str(e).lower():
+                menu_id = None
+                _ui_save_state(target_chat_id, user_id, menu=None)
+            # если не можем редактировать (старое/ограничения) — создадим новое "правильное" меню
+            if "message can't be edited" in str(e).lower() or "message is too old" in str(e).lower():
                 menu_id = None
                 _ui_save_state(target_chat_id, user_id, menu=None)
 
@@ -1874,6 +1885,25 @@ async def _ui_ensure_main_menu(bot: Bot, chat_id: int, user_id: int) -> int:
     )
     _ui_save_state(target_chat_id, user_id, menu=msg.message_id)
     return msg.message_id
+
+async def _ui_clear_content(bot: Bot, chat_id: int, user_id: int) -> None:
+    """
+    Deletes the content message (2nd UI message) and clears ui_state.content_message_id.
+    Used when returning to root so only the main menu remains.
+    """
+    init_db()
+    target_chat_id, _extra = _ui_route_kwargs(chat_id)
+    state = _ui_get_state(target_chat_id, user_id)
+    content_id = state.get("content")
+    if not content_id:
+        return
+    try:
+        await bot.delete_message(target_chat_id, int(content_id))
+    except (TelegramBadRequest, TelegramForbiddenError):
+        pass
+    except Exception:
+        pass
+    _ui_save_state(target_chat_id, user_id, content=None)
 
 async def _ui_edit_content(
     bot: Bot,
@@ -2993,7 +3023,7 @@ async def cmd_it_menu(message: Message):
     u = get_user(message.from_user.id)
     name = (u or {}).get("full_name") or "—"
     text = f"👋 Привет, <b>{name}</b> (IT)!\n\nВыберите действие:"
-    await _edit_or_send(message.bot, message.chat.id, message.from_user.id, text, reply_markup=main_menu_kb("it"))
+    await _edit_or_send(message.bot, message.chat.id, message.from_user.id, text, reply_markup=_ui_back_to_root_kb())
 
 @router.message(Command("brig"))
 async def cmd_brig_menu(message: Message):
@@ -3005,7 +3035,7 @@ async def cmd_brig_menu(message: Message):
     u = get_user(message.from_user.id)
     name = (u or {}).get("full_name") or "—"
     text = f"👋 Привет, <b>{name}</b> (бригадир)!\n\nВыберите действие:"
-    await _edit_or_send(message.bot, message.chat.id, message.from_user.id, text, reply_markup=main_menu_kb("brigadier"))
+    await _edit_or_send(message.bot, message.chat.id, message.from_user.id, text, reply_markup=_ui_back_to_root_kb())
 
 @router.message(Command("addrole"))
 async def cmd_add_role(message: Message):
@@ -3129,40 +3159,9 @@ async def capture_full_name(message: Message, state: FSMContext):
 # -------------- Рисовалки экранов --------------
 
 async def show_main_menu(chat_id:int, user_id:int, u:dict, header:str):
-    class Dummy: pass
-    dummy = Dummy()
-    dummy.from_user = Dummy()
-    dummy.from_user.id = user_id
-    dummy.from_user.username = (u or {}).get("username")
-    role = get_role_label(user_id)
-
-    # у обычных статистика — без ФИО, а шапка остаётся
-    name = (u or {}).get("full_name") or "—"
-    role_suffix = " (бригадир)" if role == "brigadier" else (" (админ)" if role == "admin" else "")
-    prefix = (header or "").strip()
-    if prefix:
-        prefix = prefix + "\n\n"
-    text = f"{prefix}👋 Привет, <b>{name}</b>{role_suffix}!\n\nВыберите действие:"
-    if role == "it":
-        text += (
-            "\n\nДоступные команды:\n"
-            "• admin — админ-меню\n"
-            "• brig — меню бригадиров\n"
-            "• it — IT-меню\n"
-            "• menu — основное меню"
-        )
-    if role == "admin":
-        text += (
-            "\n\nДоступные команды:\n"
-            "• admin — админ-меню\n"
-            "• brig — меню бригадиров\n"
-            "• it — IT-меню\n"
-            "• menu — основное меню"
-        )
-    
-    # В новой схеме меню — отдельным (статичным) сообщением, а этот экран рисуем в "контент"
+    # Root should be максимально чистым: оставляем только основное (статичное) меню и удаляем контент.
     await _ui_ensure_main_menu(bot, chat_id, user_id)
-    await _ui_edit_content(bot, chat_id, user_id, text, reply_markup=None)
+    await _ui_clear_content(bot, chat_id, user_id)
 
 async def show_settings_menu(bot: Bot, chat_id:int, user_id:int, header:str="Здесь вы можете сменить ФИО."):
     await _edit_or_send(bot, chat_id, user_id, header, reply_markup=settings_menu_kb())
@@ -3204,7 +3203,7 @@ async def show_stats_today(chat_id:int, user_id:int, admin:bool, via_command=Fal
                 total += h
             parts.append(f"\nИтого: <b>{total}</b> ч")
             text = "\n".join(parts)
-    await _edit_or_send(bot, chat_id, user_id, text, reply_markup=main_menu_kb(role))
+    await _edit_or_send(bot, chat_id, user_id, text, reply_markup=_ui_back_to_root_kb())
 
 async def show_stats_week(chat_id:int, user_id:int, admin:bool, via_command=False):
     role = get_role_label(user_id)
@@ -3249,7 +3248,7 @@ async def show_stats_week(chat_id:int, user_id:int, admin:bool, via_command=Fals
                     total += h
             parts.append(f"\nИтого: <b>{total}</b> ч")
             text = "\n".join(parts)
-    await _edit_or_send(bot, chat_id, user_id, text, reply_markup=main_menu_kb(role))
+    await _edit_or_send(bot, chat_id, user_id, text, reply_markup=_ui_back_to_root_kb())
 
 # -------------- Меню --------------
 
@@ -3274,17 +3273,11 @@ def _format_otd_summary(work: dict) -> str:
 async def cb_menu_root(c: CallbackQuery, state: FSMContext):
     await state.clear()  # очень важно: выходим из любого состояния
     await c.answer()  # закрыть «часики»
-    
-    u = get_user(c.from_user.id)
-    
-    name = (u or {}).get("full_name") or "—"
-    role = get_role_label(c.from_user.id)
-    role_suffix = " (бригадир)" if role == "brigadier" else (" (админ)" if role == "admin" else "")
     await show_main_menu(
         c.message.chat.id,
         c.from_user.id,
-        u or {},
-        f"👋 Привет, <b>{name}</b>{role_suffix}!\n\nВыберите действие:",
+        get_user(c.from_user.id) or {},
+        "",
     )
 
 # Обработчик кнопки Start удален - теперь обычные пользователи сразу видят полное меню
@@ -3875,9 +3868,8 @@ async def otd_confirm_ok(c: CallbackQuery, state: FSMContext):
         pass
     await state.clear()
     text = _format_otd_summary(work)
-    role = get_role_label(c.from_user.id)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        f"✅ Сохранено\n\n{text}", reply_markup=main_menu_kb(role))
+                        f"✅ Сохранено\n\n{text}", reply_markup=_ui_back_to_root_kb())
     await c.answer("Сохранено")
 
 def _brig_date_kb() -> InlineKeyboardMarkup:
@@ -5071,7 +5063,7 @@ async def brig_confirm_save(c: CallbackQuery, state: FSMContext):
         await state.clear()
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                             "✅ ОБ сохранено",
-                            reply_markup=main_menu_kb(get_role_label(c.from_user.id)))
+                            reply_markup=_ui_back_to_root_kb())
         await c.answer("Сохранено")
         return
     mode = brig.get("mode") or "hand"
@@ -5105,13 +5097,13 @@ async def brig_confirm_save(c: CallbackQuery, state: FSMContext):
         work_date=brig.get("work_date") or date.today().isoformat(),
     )
     await state.clear()
-    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, "✅ Отчет бригадира сохранен", reply_markup=main_menu_kb(get_role_label(c.from_user.id)))
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, "✅ Отчет бригадира сохранен", reply_markup=_ui_back_to_root_kb())
     await c.answer("Сохранено")
 
 @router.callback_query(F.data == "brig:confirm:cancel")
 async def brig_confirm_cancel(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, "Отчет отменен", reply_markup=main_menu_kb(get_role_label(c.from_user.id)))
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, "Отчет отменен", reply_markup=_ui_back_to_root_kb())
     await c.answer()
 
 @router.callback_query(F.data == "brig:stats")
@@ -5181,7 +5173,7 @@ async def brig_stats_show(c: CallbackQuery):
     ob_stats = fetch_brig_stats(c.from_user.id, start, today)
     otd_rows = fetch_stats_range_for_user(c.from_user.id, start.isoformat(), today.isoformat())
     text = _render_brig_stats_ob(ob_stats, period) + "\n\n" + _render_brig_stats_otd(otd_rows, period, start, today)
-    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, text, reply_markup=main_menu_kb(get_role_label(c.from_user.id)))
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, text, reply_markup=_ui_back_to_root_kb())
     await c.answer()
 
 @router.callback_query(F.data == "tim:party")
@@ -5191,7 +5183,7 @@ async def tim_party(c: CallbackQuery):
         return
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                         "👀 Режим наблюдения TIM активен. Доступны: статистика и смена имени.",
-                        reply_markup=main_menu_kb("tim"))
+                        reply_markup=_ui_back_to_root_kb())
     await c.answer()
 
 @router.callback_query(F.data == "it:star")
@@ -5201,7 +5193,7 @@ async def it_star(c: CallbackQuery):
         return
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                         "⭐ IT панель: используйте /menu для полного списка. Статистика доступна в меню.",
-                        reply_markup=main_menu_kb("it"))
+                        reply_markup=_ui_back_to_root_kb())
     await c.answer()
 
 @router.callback_query(F.data == "menu:edit")
@@ -6319,8 +6311,7 @@ async def pick_hours(c: CallbackQuery, state: FSMContext):
         f"ID записи: <code>#{rid}</code>"
     )
     await state.clear()
-    role = get_role_label(c.from_user.id)
-    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, text, reply_markup=main_menu_kb(role))
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, text, reply_markup=_ui_back_to_root_kb())
     await c.answer()
 
 # -------------- Перепись: удалить/изменить -------------
