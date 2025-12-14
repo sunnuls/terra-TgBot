@@ -1792,6 +1792,9 @@ MAIN_MENU_TEXT = (
 # быстрый кэш ui_state (chat_id, user_id) -> {"menu": int|None, "content": int|None}
 _ui_cache: Dict[Tuple[int, int], dict] = {}
 
+# sentinel to distinguish "not provided" from "set NULL"
+_UNSET = object()
+
 async def _ui_try_delete_user_message(message: Message) -> None:
     """
     Best-effort cleanup: tries to delete user's text input to keep the chat cleaner.
@@ -1823,11 +1826,11 @@ def _ui_get_state(chat_id: int, user_id: int) -> dict:
     _ui_cache[key] = state
     return state
 
-def _ui_save_state(chat_id: int, user_id: int, *, menu: Optional[int] = None, content: Optional[int] = None) -> None:
+def _ui_save_state(chat_id: int, user_id: int, *, menu=_UNSET, content=_UNSET) -> None:
     now = datetime.now().isoformat()
     prev = _ui_get_state(chat_id, user_id)
-    new_menu = menu if menu is not None else prev.get("menu")
-    new_content = content if content is not None else prev.get("content")
+    new_menu = prev.get("menu") if menu is _UNSET else menu
+    new_content = prev.get("content") if content is _UNSET else content
     with connect() as con, closing(con.cursor()) as c:
         c.execute(
             """
@@ -1856,13 +1859,12 @@ async def _ui_ensure_main_menu(bot: Bot, chat_id: int, user_id: int) -> int:
 
     if menu_id:
         try:
-            # держим текст меню строго как MAIN_MENU_TEXT + обновляем клавиатуру под роль
-            await bot.edit_message_text(
+            # Важно: не трогаем текст (чтобы не упираться в ограничения редактирования текста),
+            # обновляем только клавиатуру под роль.
+            await bot.edit_message_reply_markup(
                 chat_id=target_chat_id,
                 message_id=menu_id,
-                text=MAIN_MENU_TEXT,
                 reply_markup=main_menu_kb(role),
-                disable_web_page_preview=True,
             )
             return int(menu_id)
         except TelegramBadRequest as e:
@@ -1871,7 +1873,7 @@ async def _ui_ensure_main_menu(bot: Bot, chat_id: int, user_id: int) -> int:
             if "message to edit not found" in str(e).lower():
                 menu_id = None
                 _ui_save_state(target_chat_id, user_id, menu=None)
-            # если не можем редактировать (старое/ограничения) — создадим новое "правильное" меню
+            # если не можем редактировать — создадим новое "правильное" меню
             if "message can't be edited" in str(e).lower() or "message is too old" in str(e).lower():
                 menu_id = None
                 _ui_save_state(target_chat_id, user_id, menu=None)
