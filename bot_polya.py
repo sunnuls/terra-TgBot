@@ -2963,10 +2963,20 @@ async def is_admin_user(bot: Bot, chat_id: int, user_id: int) -> bool:
 router = Router()
 router_topics = Router()  # Отдельный роутер для модерации тем
 
+# В read-only чате запрещаем обработку ЛЮБЫХ входящих апдейтов обычным роутером:
+# никаких команд, меню, кнопок и т.п. (в группе должны быть только отчёты).
+if READONLY_CHAT_ID is not None:
+    router.message.filter(lambda m: m.chat.id != READONLY_CHAT_ID)
+    router.callback_query.filter(
+        lambda c: not (
+            getattr(getattr(c, "message", None), "chat", None)
+            and c.message.chat.id == READONLY_CHAT_ID
+        )
+    )
+
 # Полный read-only чат: удаляем сообщения обычных пользователей (включая команды).
 if READONLY_CHAT_ID is not None:
     @router_topics.message(
-        F.chat.type == "supergroup",
         F.chat.id == READONLY_CHAT_ID,
     )
     async def guard_readonly_chat(message: Message):
