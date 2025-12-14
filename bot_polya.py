@@ -3100,22 +3100,29 @@ async def cmd_it_menu(message: Message):
     if not (is_it(message.from_user.id, message.from_user.username) or is_admin(message)):
         await message.answer("Нет прав")
         return
+    # убираем команду, чтобы не засорять чат
+    await _ui_try_delete_user_message(message)
     u = get_user(message.from_user.id)
     name = (u or {}).get("full_name") or "—"
     text = f"👋 Привет, <b>{name}</b> (IT)!\n\nВыберите действие:"
-    await _edit_or_send(message.bot, message.chat.id, message.from_user.id, text, reply_markup=_ui_back_to_root_kb())
+    await _ui_ensure_main_menu(message.bot, message.chat.id, message.from_user.id)
+    await _ui_edit_content(message.bot, message.chat.id, message.from_user.id, text, reply_markup=main_menu_kb("it"))
 
 @router.message(Command("brig"))
+@router.message(Command("briq"))  # частая опечатка
 async def cmd_brig_menu(message: Message):
     if not _is_allowed_topic(message):
         return
     if not (is_brigadier(message.from_user.id, message.from_user.username) or is_admin(message)):
         await message.answer("Нет прав")
         return
+    # убираем команду, чтобы не засорять чат
+    await _ui_try_delete_user_message(message)
     u = get_user(message.from_user.id)
     name = (u or {}).get("full_name") or "—"
     text = f"👋 Привет, <b>{name}</b> (бригадир)!\n\nВыберите действие:"
-    await _edit_or_send(message.bot, message.chat.id, message.from_user.id, text, reply_markup=_ui_back_to_root_kb())
+    await _ui_ensure_main_menu(message.bot, message.chat.id, message.from_user.id)
+    await _ui_edit_content(message.bot, message.chat.id, message.from_user.id, text, reply_markup=main_menu_kb("brigadier"))
 
 @router.message(Command("addrole"))
 async def cmd_add_role(message: Message):
