@@ -2529,7 +2529,7 @@ def otd_crops_kb(*, kamaz: bool = False) -> InlineKeyboardMarkup:
         if (c_name or "").strip() == "Прочее":
             kb.button(text="Прочее…", callback_data="otd:crop:__other__")
         else:
-            kb.button(text=c_name, callback_data=f"otd:crop:{c_name}")
+        kb.button(text=c_name, callback_data=f"otd:crop:{c_name}")
     kb.adjust(2)
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:loc_or_work"))
     return kb.as_markup()
@@ -2966,16 +2966,21 @@ router_topics = Router()  # Отдельный роутер для модера�
 # В read-only чате запрещаем обработку ЛЮБЫХ входящих апдейтов обычным роутером:
 # никаких команд, меню, кнопок и т.п. (в группе должны быть только отчёты).
 if READONLY_CHAT_ID is not None:
-    router.message.filter(lambda m: m.chat.id != READONLY_CHAT_ID)
-    router.callback_query.filter(
-        lambda c: not (
-            getattr(getattr(c, "message", None), "chat", None)
-            and c.message.chat.id == READONLY_CHAT_ID
-        )
-    )
+    # Используем MagicFilter (F.*), а не lambda: в aiogram v3 lambda может не применяться как фильтр.
+    router.message.filter(F.chat.id != READONLY_CHAT_ID)
+    # CallbackQuery обычно всегда имеет message, но на всякий случай пропускаем те, где message отсутствует.
+    router.callback_query.filter(F.message.is_(None) | (F.message.chat.id != READONLY_CHAT_ID))
 
 # Полный read-only чат: удаляем сообщения обычных пользователей (включая команды).
 if READONLY_CHAT_ID is not None:
+    # И дополнительно глушим callback-и (нажатия на inline-кнопки), чтобы не было "реакций" в чате.
+    @router_topics.callback_query(F.message.chat.id == READONLY_CHAT_ID)
+    async def guard_readonly_callbacks(c: CallbackQuery):
+        try:
+            await c.answer()
+        except Exception:
+            pass
+
     @router_topics.message(
         F.chat.id == READONLY_CHAT_ID,
     )
@@ -3493,9 +3498,9 @@ def _format_otd_summary(work: dict) -> str:
         lines.append(f"6. Место погрузки - {location}")
         lines.append(f"7. Рейсов - {work.get('trips') or 0}")
     else:
-        lines.append(f"5. Работа - {work.get('activity', '—')}")
-        lines.append(f"6. Культура - {work.get('crop', '—')}")
-        lines.append(f"7. Место - {location}")
+    lines.append(f"5. Работа - {work.get('activity', '—')}")
+    lines.append(f"6. Культура - {work.get('crop', '—')}")
+    lines.append(f"7. Место - {location}")
     return "\n".join(lines)
 
 def _format_otd_summary_with_title(work: dict, title: str) -> str:
@@ -4238,10 +4243,10 @@ async def otd_confirm_ok(c: CallbackQuery, state: FSMContext):
             await c.answer("Не все данные заполнены", show_alert=True)
             return
     else:
-        required = ("work_date", "hours", "activity", "crop")
-        if not all(work.get(k) for k in required):
-            await c.answer("Не все данные заполнены", show_alert=True)
-            return
+    required = ("work_date", "hours", "activity", "crop")
+    if not all(work.get(k) for k in required):
+        await c.answer("Не все данные заполнены", show_alert=True)
+        return
     # проверка лимита часов
     already = sum_hours_for_user_date(c.from_user.id, work["work_date"])
     if already + int(work["hours"]) > 24:
