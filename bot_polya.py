@@ -2113,11 +2113,36 @@ async def _send_new_message(bot: Bot, chat_id: int, user_id: int, text: str, rep
 
 def reply_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="🧰 Меню")]],
+        keyboard=[[KeyboardButton(text="🔄 Сброс")]],
         resize_keyboard=True,
         is_persistent=True,
         one_time_keyboard=False,
     )
+
+async def _ui_reset(bot: Bot, chat_id: int, user_id: int) -> None:
+    """
+    "Мягкий reset" UI: очищает ui_state (menu/content), пытается удалить UI-сообщения,
+    сбрасывает FSM и создаёт новое главное меню.
+    Важно: это НЕ удаляет историю отчётов (БД reports).
+    Полностью "очистить весь чат" бот не может, т.к. Telegram API не даёт список сообщений.
+    """
+    init_db()
+    target_chat_id, _extra = _ui_route_kwargs(chat_id)
+    async with _ui_get_lock(target_chat_id, user_id):
+        st = _ui_get_state(target_chat_id, user_id)
+        # удаляем контент и меню (если возможно)
+        for key in ("content", "menu"):
+            mid = st.get(key)
+            if not mid:
+                continue
+            try:
+                await bot.delete_message(target_chat_id, int(mid))
+            except (TelegramBadRequest, TelegramForbiddenError):
+                pass
+            except Exception:
+                pass
+        _ui_save_state(target_chat_id, user_id, menu=None, content=None)
+    await _ui_ensure_main_menu(bot, chat_id, user_id)
 
 # Удаляем отдельные клавиатуры - используем только одну для всех
 
@@ -3054,26 +3079,18 @@ async def cmd_reset_ui(message: Message, state: FSMContext):
     if not is_admin(message):
         return
     await state.clear()
-    init_db()
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    target_chat_id, _extra = _ui_route_kwargs(chat_id)
-    st = _ui_get_state(target_chat_id, user_id)
-    # пытаемся удалить оба UI-сообщения (если возможно)
-    for key in ("content", "menu"):
-        mid = st.get(key)
-        if not mid:
-            continue
-        try:
-            await message.bot.delete_message(target_chat_id, int(mid))
-        except (TelegramBadRequest, TelegramForbiddenError):
-            pass
-        except Exception:
-            pass
-    _ui_save_state(target_chat_id, user_id, menu=None, content=None)
     # удалим саму команду пользователя (если можем) и перерисуем меню
     await _ui_try_delete_user_message(message)
-    await _ui_ensure_main_menu(message.bot, chat_id, user_id)
+    await _ui_reset(message.bot, message.chat.id, message.from_user.id)
+
+@router.message(Command("reset"))
+async def cmd_reset(message: Message, state: FSMContext):
+    # Проверяем разрешенную тему для команд
+    if not _is_allowed_topic(message):
+        return
+    await state.clear()
+    await _ui_try_delete_user_message(message)
+    await _ui_reset(message.bot, message.chat.id, message.from_user.id)
 
 @router.message(Command("menu"))
 async def cmd_menu(message: Message, state: FSMContext):
@@ -3188,21 +3205,12 @@ async def cmd_list_roles(message: Message):
         lines.append(f"{role}: {uid} (by {added_by} at {added_at})")
     await message.answer("\n".join(lines))
 
-@router.message(F.text == "🧰 Меню")
+@router.message(F.text.in_({"🧰 Меню", "🔄 Сброс"}))
 async def msg_persistent_menu(message: Message, state: FSMContext):
-    u = get_user(message.from_user.id)
-    if not u or not (u.get("full_name") or "").strip():
-        await state.set_state(NameFSM.waiting_name)
-        await message.answer("Введите <b>Фамилию Имя</b> для регистрации (например: <b>Иванов Иван</b>).")
-        return
-
-    # Удаляем текстовое сообщение пользователя "Меню"
-    try:
-        await message.delete()
-    except TelegramBadRequest:
-        pass
-    
-    await show_main_menu(message.chat.id, message.from_user.id, u, "Меню")
+    # Нижняя кнопка теперь — "аварийный reset UI". Для совместимости принимаем и старый текст "🧰 Меню".
+    await state.clear()
+    await _ui_try_delete_user_message(message)
+    await _ui_reset(message.bot, message.chat.id, message.from_user.id)
 
 # Удалены лишние обработчики кнопок постоянной клавиатуры
 
