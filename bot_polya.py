@@ -2115,7 +2115,11 @@ async def _ui_reset(bot: Bot, chat_id: int, user_id: int) -> None:
             except Exception:
                 pass
         _ui_save_state(target_chat_id, user_id, menu=None, content=None)
+    # 1) создаём статичное меню (reply keyboard with "🔄 Сброс")
     await _ui_ensure_main_menu(bot, chat_id, user_id)
+    # 2) и сразу рисуем контент-меню с inline кнопками (чтобы не требовался /start)
+    role = get_role_label(user_id)
+    await _ui_edit_content(bot, chat_id, user_id, "Выберите действие:", reply_markup=main_menu_kb(role))
 
 # Удаляем отдельные клавиатуры - используем только одну для всех
 
