@@ -1729,8 +1729,10 @@ class OtdFSM(StatesGroup):
     pick_machine = State()
     pick_machine_custom = State()
     pick_activity = State()
+    pick_activity_custom = State()
     pick_location = State()
     pick_crop = State()
+    pick_crop_custom = State()
     pick_trips = State()
     confirm = State()
 
@@ -3447,7 +3449,23 @@ def _format_otd_summary(work: dict) -> str:
     lines.append(f"7. Место - {location}")
     if work.get("machine_mode") == "single":
         lines.append(f"8. Рейсов - {work.get('trips') or 0}")
-    lines.append("\nВсе верно?")
+    return "\n".join(lines)
+
+def _format_otd_summary_with_title(work: dict, title: str) -> str:
+    # Универсальный форматтер для подтверждения/итогового экрана
+    lines = [title, ""]
+    lines.append(f"1. Дата - {work.get('work_date', '—')}")
+    lines.append(f"2. Часы - {work.get('hours', '—')}")
+    machine_type = work.get("machine_type") or ("Ручная" if work.get("act_grp") == GROUP_HAND else "—")
+    lines.append(f"3. {machine_type}")
+    machine_name = work.get("machine_name") or "—"
+    lines.append(f"4. {machine_name}")
+    lines.append(f"5. Работа - {work.get('activity', '—')}")
+    lines.append(f"6. Культура - {work.get('crop', '—')}")
+    location = work.get("location") or "—"
+    lines.append(f"7. Место - {location}")
+    if work.get("machine_mode") == "single":
+        lines.append(f"8. Рейсов - {work.get('trips') or 0}")
     return "\n".join(lines)
 
 @router.callback_query(F.data == "menu:root")
@@ -3828,6 +3846,23 @@ async def otd_pick_twork(c: CallbackQuery, state: FSMContext):
     act = c.data.split(":", 2)[2]
     data = await state.get_data()
     work = data.get("otd", {})
+    if act == "Прочее":
+        work["act_grp"] = GROUP_TECH
+        work["field_back"] = "twork"
+        await state.update_data(otd=work)
+        await state.set_state(OtdFSM.pick_activity_custom)
+        await _edit_or_send(
+            c.bot,
+            c.message.chat.id,
+            c.from_user.id,
+            "Введите вид работы (свободная форма):",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:actcustom")]
+            ]),
+        )
+        await c.answer()
+        return
+
     work["activity"] = act
     work["act_grp"] = GROUP_TECH
     work["field_back"] = "twork"
@@ -3866,6 +3901,24 @@ async def otd_pick_hand(c: CallbackQuery, state: FSMContext):
     act = c.data.split(":", 2)[2]
     data = await state.get_data()
     work = data.get("otd", {})
+    if act == "Прочее":
+        work["act_grp"] = GROUP_HAND
+        work["machine_type"] = "Ручная"
+        work["machine_name"] = None
+        await state.update_data(otd=work)
+        await state.set_state(OtdFSM.pick_activity_custom)
+        await _edit_or_send(
+            c.bot,
+            c.message.chat.id,
+            c.from_user.id,
+            "Введите вид работы (свободная форма):",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:actcustom")]
+            ]),
+        )
+        await c.answer()
+        return
+
     work["activity"] = act
     work["act_grp"] = GROUP_HAND
     work["machine_type"] = "Ручная"
@@ -3876,11 +3929,69 @@ async def otd_pick_hand(c: CallbackQuery, state: FSMContext):
                         "Культура:", reply_markup=otd_crops_kb(kamaz=(work.get("machine_mode") == "single")))
     await c.answer()
 
+@router.callback_query(F.data == "otd:back:actcustom")
+async def otd_back_actcustom(c: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    work = data.get("otd", {})
+    if work.get("act_grp") == GROUP_TECH:
+        await state.set_state(OtdFSM.pick_activity)
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            "Выберите вид деятельности трактора:", reply_markup=otd_tractor_work_kb())
+    else:
+        await state.set_state(OtdFSM.pick_activity)
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            "Выберите вид работы:", reply_markup=otd_hand_work_kb())
+    await c.answer()
+
+@router.message(OtdFSM.pick_activity_custom)
+async def otd_pick_activity_custom(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
+    act = (message.text or "").strip()
+    if not act:
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Введите вид работы текстом.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:actcustom")]
+            ]),
+        )
+        return
+    data = await state.get_data()
+    work = data.get("otd", {})
+    work["activity"] = act
+    await state.update_data(otd=work)
+
+    # дальше — по группе работы
+    if work.get("act_grp") == GROUP_TECH:
+        await state.set_state(OtdFSM.pick_location)
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
+                            "Поле:", reply_markup=otd_fields_kb("otd:field"))
+    else:
+        await state.set_state(OtdFSM.pick_crop)
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
+                            "Культура:", reply_markup=otd_crops_kb(kamaz=(work.get("machine_mode") == "single")))
+
 @router.callback_query(F.data.startswith("otd:crop:"))
 async def otd_pick_crop(c: CallbackQuery, state: FSMContext):
     crop = c.data.split(":", 2)[2]
     data = await state.get_data()
     work = data.get("otd", {})
+    if crop == "Прочее":
+        await state.set_state(OtdFSM.pick_crop_custom)
+        await _edit_or_send(
+            c.bot,
+            c.message.chat.id,
+            c.from_user.id,
+            "Введите культуру (свободная форма):",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:crop")]
+            ]),
+        )
+        await c.answer()
+        return
+
     work["crop"] = crop
     await state.update_data(otd=work)
     if work.get("machine_type") == "КамАЗ":
@@ -3897,6 +4008,58 @@ async def otd_pick_crop(c: CallbackQuery, state: FSMContext):
     else:
         await otd_back_type(c, state)
     await c.answer()
+
+@router.callback_query(F.data == "otd:back:crop")
+async def otd_back_crop(c: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    work = data.get("otd", {})
+    await state.set_state(OtdFSM.pick_crop)
+    await _edit_or_send(
+        c.bot,
+        c.message.chat.id,
+        c.from_user.id,
+        "Культура:",
+        reply_markup=otd_crops_kb(kamaz=(work.get("machine_mode") == "single")),
+    )
+    await c.answer()
+
+@router.message(OtdFSM.pick_crop_custom)
+async def otd_pick_crop_custom(message: Message, state: FSMContext):
+    await _ui_try_delete_user_message(message)
+    crop = (message.text or "").strip()
+    if not crop:
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Введите культуру текстом.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:crop")]
+            ]),
+        )
+        return
+    data = await state.get_data()
+    work = data.get("otd", {})
+    work["crop"] = crop
+    await state.update_data(otd=work)
+
+    # дальше — как в otd_pick_crop
+    if work.get("machine_type") == "КамАЗ":
+        await state.set_state(OtdFSM.pick_trips)
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
+                            "Сколько рейсов? Введите число:")
+    elif work.get("machine_type") == "Трактор":
+        await _otd_to_confirm(message.bot, message.chat.id, message.from_user.id, state)
+    elif work.get("act_grp") == GROUP_HAND:
+        work.setdefault("location", "—")
+        work.setdefault("location_grp", "—")
+        await state.update_data(otd=work)
+        await _otd_to_confirm(message.bot, message.chat.id, message.from_user.id, state)
+    else:
+        # в крайнем случае вернем на выбор типа
+        await state.set_state(OtdFSM.pick_type)
+        await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
+                            "Выберите тип работы:", reply_markup=otd_type_keyboard())
 
 @router.message(OtdFSM.pick_trips)
 async def otd_pick_trips(message: Message, state: FSMContext):
@@ -4044,14 +4207,14 @@ async def otd_confirm_ok(c: CallbackQuery, state: FSMContext):
         trips=work.get("trips"),
     )
     try:
-        await stats_notify_created(bot, rid)
+        await stats_notify_created(c.bot, rid)
     except Exception:
         pass
     await state.clear()
-    text = _format_otd_summary(work)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        f"✅ Сохранено\n\n{text}", reply_markup=_ui_back_to_root_kb())
-    await c.answer("Сохранено")
+                        _format_otd_summary_with_title(work, "✅✅✅ <b>Успешно сохранено</b>"),
+                        reply_markup=_ui_back_to_root_kb())
+    await c.answer("✅ Успешно сохранено")
 
 def _brig_date_kb() -> InlineKeyboardMarkup:
     today = date.today()
@@ -6480,7 +6643,7 @@ async def pick_hours(c: CallbackQuery, state: FSMContext):
     )
     # Публикация в топике статистики
     try:
-        await stats_notify_created(bot, rid)
+        await stats_notify_created(c.bot, rid)
     except Exception:
         pass
     text = (
@@ -6509,7 +6672,7 @@ async def cb_edit_delete(c: CallbackQuery):
     # Обновим сводку в статистике (если была удалена)
     if ok:
         try:
-            await stats_notify_deleted(bot, rid, deleted=before)
+            await stats_notify_deleted(c.bot, rid, deleted=before)
         except Exception:
             pass
     await cb_menu_edit(c)
@@ -6882,7 +7045,7 @@ async def cb_edit_hours_value(c: CallbackQuery, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, rid, before=before)
+            await stats_notify_changed(c.bot, rid, before=before)
         except Exception:
             pass
         await c.answer("Обновлено")
@@ -6937,7 +7100,7 @@ async def cb_edit_location_final(c: CallbackQuery, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, rid, before=before)
+            await stats_notify_changed(c.bot, rid, before=before)
         except Exception:
             pass
         await c.answer("Локация обновлена")
@@ -7004,7 +7167,7 @@ async def cb_edit_activity_final(c: CallbackQuery, state: FSMContext):
             else:
                 await state.clear()
             try:
-                await stats_notify_changed(bot, rid, before=before)
+                await stats_notify_changed(c.bot, rid, before=before)
             except Exception:
                 pass
             await c.answer("Вид работы обновлен")
@@ -7046,7 +7209,7 @@ async def cb_edit_custom_activity(message: Message, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, int(rid), before=before)
+            await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
         if queue_active:
@@ -7080,7 +7243,7 @@ async def cb_edit_machine(message: Message, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, int(rid), before=before)
+            await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
         if queue_active:
@@ -7111,7 +7274,7 @@ async def cb_edit_crop(message: Message, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, int(rid), before=before)
+            await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
         if queue_active:
@@ -7143,7 +7306,7 @@ async def cb_edit_trips(message: Message, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, int(rid), before=before)
+            await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
         if queue_active:
@@ -7182,7 +7345,7 @@ async def cb_edit_date(message: Message, state: FSMContext):
         else:
             await state.clear()
         try:
-            await stats_notify_changed(bot, int(rid), before=before)
+            await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
         if queue_active:
