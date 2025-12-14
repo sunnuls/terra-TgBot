@@ -1809,6 +1809,17 @@ def _ui_main_menu_text(user_id: int) -> str:
 # быстрый кэш ui_state (chat_id, user_id) -> {"menu": int|None, "content": int|None}
 _ui_cache: Dict[Tuple[int, int], dict] = {}
 
+# UI locks: prevent races when multiple callback updates are processed concurrently.
+_ui_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
+
+def _ui_get_lock(chat_id: int, user_id: int) -> asyncio.Lock:
+    key = (chat_id, user_id)
+    lock = _ui_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ui_locks[key] = lock
+    return lock
+
 # sentinel to distinguish "not provided" from "set NULL"
 _UNSET = object()
 
@@ -1875,50 +1886,56 @@ async def _ui_ensure_main_menu(bot: Bot, chat_id: int, user_id: int) -> int:
     menu_id = state.get("menu")
     desired_text = _ui_main_menu_text(user_id)
 
-    if menu_id:
-        try:
-            # Пытаемся синхронизировать текст+клавиатуру. Если текст нельзя редактировать —
-            # тихо обновим только клавиатуру, НЕ пересоздавая сообщение.
+    # Lock per (target_chat_id, user_id) so menu/content ops don't race
+    async with _ui_get_lock(target_chat_id, user_id):
+        # re-read inside lock (state may have changed)
+        state = _ui_get_state(target_chat_id, user_id)
+        menu_id = state.get("menu")
+
+        if menu_id:
             try:
-                await bot.edit_message_text(
-                    chat_id=target_chat_id,
-                    message_id=menu_id,
-                    text=desired_text,
-                    reply_markup=main_menu_kb(role),
-                    disable_web_page_preview=True,
-                )
-            except TelegramBadRequest as e2:
-                if "message is not modified" in str(e2).lower():
-                    pass
-                elif "message can't be edited" in str(e2).lower() or "message is too old" in str(e2).lower():
-                    await bot.edit_message_reply_markup(
+                # Пытаемся синхронизировать текст+клавиатуру. Если текст нельзя редактировать —
+                # тихо обновим только клавиатуру, НЕ пересоздавая сообщение.
+                try:
+                    await bot.edit_message_text(
                         chat_id=target_chat_id,
                         message_id=menu_id,
+                        text=desired_text,
                         reply_markup=main_menu_kb(role),
+                        disable_web_page_preview=True,
                     )
-                else:
-                    raise
-            return int(menu_id)
-        except TelegramBadRequest as e:
-            if "message is not modified" in str(e).lower():
+                except TelegramBadRequest as e2:
+                    if "message is not modified" in str(e2).lower():
+                        pass
+                    elif "message can't be edited" in str(e2).lower() or "message is too old" in str(e2).lower():
+                        await bot.edit_message_reply_markup(
+                            chat_id=target_chat_id,
+                            message_id=menu_id,
+                            reply_markup=main_menu_kb(role),
+                        )
+                    else:
+                        raise
                 return int(menu_id)
-            if "message to edit not found" in str(e).lower():
-                menu_id = None
-                _ui_save_state(target_chat_id, user_id, menu=None)
-            # если не можем редактировать — создадим новое "правильное" меню
-            if "message can't be edited" in str(e).lower() or "message is too old" in str(e).lower():
-                menu_id = None
-                _ui_save_state(target_chat_id, user_id, menu=None)
+            except TelegramBadRequest as e:
+                if "message is not modified" in str(e).lower():
+                    return int(menu_id)
+                if "message to edit not found" in str(e).lower():
+                    menu_id = None
+                    _ui_save_state(target_chat_id, user_id, menu=None)
+                # если не можем редактировать — создадим новое "правильное" меню
+                if "message can't be edited" in str(e).lower() or "message is too old" in str(e).lower():
+                    menu_id = None
+                    _ui_save_state(target_chat_id, user_id, menu=None)
 
-    msg = await bot.send_message(
-        target_chat_id,
-        desired_text,
-        reply_markup=main_menu_kb(role),
-        disable_web_page_preview=True,
-        **extra,
-    )
-    _ui_save_state(target_chat_id, user_id, menu=msg.message_id)
-    return msg.message_id
+        msg = await bot.send_message(
+            target_chat_id,
+            desired_text,
+            reply_markup=main_menu_kb(role),
+            disable_web_page_preview=True,
+            **extra,
+        )
+        _ui_save_state(target_chat_id, user_id, menu=msg.message_id)
+        return msg.message_id
 
 async def _ui_clear_content(bot: Bot, chat_id: int, user_id: int) -> None:
     """
@@ -1927,17 +1944,18 @@ async def _ui_clear_content(bot: Bot, chat_id: int, user_id: int) -> None:
     """
     init_db()
     target_chat_id, _extra = _ui_route_kwargs(chat_id)
-    state = _ui_get_state(target_chat_id, user_id)
-    content_id = state.get("content")
-    if not content_id:
-        return
-    try:
-        await bot.delete_message(target_chat_id, int(content_id))
-    except (TelegramBadRequest, TelegramForbiddenError):
-        pass
-    except Exception:
-        pass
-    _ui_save_state(target_chat_id, user_id, content=None)
+    async with _ui_get_lock(target_chat_id, user_id):
+        state = _ui_get_state(target_chat_id, user_id)
+        content_id = state.get("content")
+        if not content_id:
+            return
+        try:
+            await bot.delete_message(target_chat_id, int(content_id))
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass
+        except Exception:
+            pass
+        _ui_save_state(target_chat_id, user_id, content=None)
 
 async def _ui_edit_content(
     bot: Bot,
@@ -1956,44 +1974,46 @@ async def _ui_edit_content(
     # 1) убедимся, что главное меню есть (чтобы схема "2 сообщения" сохранялась)
     await _ui_ensure_main_menu(bot, chat_id, user_id)
 
-    state = _ui_get_state(target_chat_id, user_id)
-    content_id = state.get("content")
-    if content_id:
-        try:
-            await bot.edit_message_text(
-                chat_id=target_chat_id,
-                message_id=content_id,
-                text=text,
-                reply_markup=reply_markup,
-                disable_web_page_preview=True,
-            )
-            return int(content_id)
-        except TelegramBadRequest as e:
-            if "message is not modified" in str(e).lower():
+    async with _ui_get_lock(target_chat_id, user_id):
+        # re-read inside lock to avoid races (double taps / parallel callback processing)
+        state = _ui_get_state(target_chat_id, user_id)
+        content_id = state.get("content")
+        if content_id:
+            try:
+                await bot.edit_message_text(
+                    chat_id=target_chat_id,
+                    message_id=content_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True,
+                )
                 return int(content_id)
-            if "message to edit not found" in str(e).lower():
-                content_id = None
-                _ui_save_state(target_chat_id, user_id, content=None)
+            except TelegramBadRequest as e:
+                if "message is not modified" in str(e).lower():
+                    return int(content_id)
+                if "message to edit not found" in str(e).lower():
+                    content_id = None
+                    _ui_save_state(target_chat_id, user_id, content=None)
 
-    # 2) если нет/не редактируется — отправим новый контент ниже меню
-    msg = await bot.send_message(
-        target_chat_id,
-        text,
-        reply_markup=reply_markup,
-        disable_web_page_preview=True,
-        **extra,
-    )
+        # 2) если нет/не редактируется — отправим новый контент ниже меню
+        msg = await bot.send_message(
+            target_chat_id,
+            text,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+            **extra,
+        )
 
-    # попробуем подчистить "старый контент", если он был (чтобы стремиться к 2 сообщениям)
-    old_content = state.get("content")
-    if old_content and old_content != msg.message_id:
-        try:
-            await bot.delete_message(target_chat_id, old_content)
-        except TelegramBadRequest:
-            pass
+        # попробуем подчистить "старый контент", если он был (чтобы стремиться к 2 сообщениям)
+        old_content = state.get("content")
+        if old_content and old_content != msg.message_id:
+            try:
+                await bot.delete_message(target_chat_id, old_content)
+            except TelegramBadRequest:
+                pass
 
-    _ui_save_state(target_chat_id, user_id, content=msg.message_id)
-    return msg.message_id
+        _ui_save_state(target_chat_id, user_id, content=msg.message_id)
+        return msg.message_id
 
 def _ui_route_kwargs(current_chat_id: int) -> tuple[int, dict]:
     """
