@@ -7436,7 +7436,9 @@ async def main():
     await ensure_robot_banner(bot)
     
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        # Не ограничиваем allowed_updates: иначе можно случайно отрезать callback_query,
+        # и тогда inline-кнопки "не работают" (команды при этом продолжают работать).
+        await dp.start_polling(bot)
     finally:
         if scheduler:
             scheduler.shutdown()
