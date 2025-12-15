@@ -675,6 +675,28 @@ def normalize_phone(raw: str) -> Optional[str]:
         return digits
     return None
 
+def format_dt_minute(value: Optional[str]) -> str:
+    """
+    Форматируем datetime для Google Sheets без секунд/миллисекунд:
+    YYYY-MM-DD HH:MM
+    На вход приходит isoformat из БД (например 2025-12-15T22:55:25.985638).
+    """
+    if not value:
+        return ""
+    s = str(value).strip()
+    if not s:
+        return ""
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        # убираем секунды/микросекунды
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        # фолбэк: если это ISO, то первых 16 символов достаточно
+        # 2025-12-15T22:55 -> 2025-12-15 22:55
+        if len(s) >= 16 and s[10] in ("T", " "):
+            return s[:10] + " " + s[11:16]
+        return s
+
 def set_user_phone(user_id: int, phone: Optional[str]) -> bool:
     """Сохранить телефон пользователю. Возвращает True если сохранено."""
     phone = (phone or "").strip() or None
@@ -1873,7 +1895,7 @@ def export_brigadier_reports_to_sheets():
             for (rid, created_at, phone, name, work_type, field, shift, rows, bags, workers,
                  work_date, is_exported, row_number, last_updated) in reports:
                 values = [
-                    created_at,
+                    format_dt_minute(created_at),
                     phone,
                     name,
                     work_type,
@@ -2056,7 +2078,7 @@ def export_reports_to_sheets():
             # Обрабатываем отчеты
             for report_id, created_at, phone, name, location, activity, work_date, hours, is_exported, row_number, last_updated in reports:
                 # phone (UserID) — телефон. Если не указан, оставляем пустым (но в логах это будет видно).
-                values = [created_at, phone, name, location, activity, work_date, hours]
+                values = [format_dt_minute(created_at), phone, name, location, activity, work_date, hours]
                 
                 if is_exported and row_number:
                     # Обновляем существующую запись с повторными попытками
@@ -4007,7 +4029,7 @@ async def capture_full_name(message: Message, state: FSMContext):
     upsert_user(message.from_user.id, text, TZ, message.from_user.username or "")
     u = get_user(message.from_user.id)
     await state.clear()
-
+    
     # После ФИО — просим телефон (нужен для Google Sheets UserID)
     if not _has_phone(u):
         await _prompt_phone_registration(message, state, back_cb=back_cb)
@@ -8420,7 +8442,7 @@ async def adm_export(c: CallbackQuery):
     try:
         count1, msg1 = await asyncio.to_thread(export_reports_to_sheets)
         count2, msg2 = await asyncio.to_thread(export_brigadier_reports_to_sheets)
-
+        
         parts = []
         if count1 > 0:
             parts.append("✅ " + msg1)
