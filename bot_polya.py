@@ -2996,8 +2996,13 @@ if READONLY_CHAT_ID is not None:
         # Все остальные удаляем молча
         try:
             await message.bot.delete_message(message.chat.id, message.message_id)
-        except Exception:
-            pass
+        except TelegramForbiddenError as e:
+            # Обычно это значит, что бот не админ / нет права "Delete messages"
+            logging.warning(f"[readonly] cannot delete message in chat {message.chat.id}: {e}")
+        except TelegramBadRequest as e:
+            logging.info(f"[readonly] delete_message bad request in chat {message.chat.id}: {e}")
+        except Exception as e:
+            logging.warning(f"[readonly] delete_message failed in chat {message.chat.id}: {e}")
 
 # Модерация темы "Часы" - удаляем все сообщения обычных пользователей
 if GROUP_CHAT_ID and HOURS_THREAD_ID:
@@ -7836,6 +7841,20 @@ async def main():
     # Read-only чат: запрещаем писать обычным пользователям на уровне прав чата
     # (админы всё равно смогут писать). Если нет прав у бота — просто игнорируем.
     if READONLY_CHAT_ID is not None:
+        # Проверим права бота в чате, чтобы было понятно почему не удаляет/не ограничивает.
+        try:
+            me = await bot.me()
+            cm = await bot.get_chat_member(READONLY_CHAT_ID, me.id)
+            is_admin_here = isinstance(cm, (ChatMemberAdministrator, ChatMemberOwner))
+            can_delete = bool(getattr(cm, "can_delete_messages", False))
+            can_restrict = bool(getattr(cm, "can_restrict_members", False))
+            logging.info(
+                f"[readonly] chat={READONLY_CHAT_ID} bot_is_admin={is_admin_here} "
+                f"can_delete_messages={can_delete} can_restrict_members={can_restrict}"
+            )
+        except Exception as e:
+            logging.warning(f"[readonly] cannot inspect bot permissions in chat {READONLY_CHAT_ID}: {e}")
+
         try:
             await bot.set_chat_permissions(
                 chat_id=READONLY_CHAT_ID,
@@ -7849,8 +7868,12 @@ async def main():
                     can_pin_messages=False,
                 ),
             )
-        except Exception:
-            pass
+        except TelegramForbiddenError as e:
+            logging.warning(f"[readonly] cannot set chat permissions in chat {READONLY_CHAT_ID}: {e}")
+        except TelegramBadRequest as e:
+            logging.info(f"[readonly] set_chat_permissions bad request in chat {READONLY_CHAT_ID}: {e}")
+        except Exception as e:
+            logging.warning(f"[readonly] set_chat_permissions failed in chat {READONLY_CHAT_ID}: {e}")
     
     try:
         # Не ограничиваем allowed_updates: иначе можно случайно отрезать callback_query,
