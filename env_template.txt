@@ -33,6 +33,13 @@ DRIVE_FOLDER_ID=
 # Префикс для названия таблиц (например: "ОТД" или "Бригадиры")
 EXPORT_PREFIX=ОТД
 
+# Отдельная папка на Google Drive для выгрузки бригадиров
+# Можно указать и ID, и URL папки.
+BRIGADIER_FOLDER_ID=
+
+# Префикс названия таблиц бригадиров
+BRIG_EXPORT_PREFIX=Бригадиры
+
 # Включить автоматический экспорт (true/false)
 AUTO_EXPORT_ENABLED=false
 

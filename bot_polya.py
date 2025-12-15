@@ -187,6 +187,10 @@ TOKEN_JSON_PATH = Path(os.getenv("TOKEN_JSON_PATH", "token.json"))
 DRIVE_FOLDER_ID = _extract_drive_folder_id(os.getenv("DRIVE_FOLDER_ID", ""))
 EXPORT_PREFIX = os.getenv("EXPORT_PREFIX", "ОТД")
 
+# Папка для выгрузки бригадиров (отдельно от общей)
+BRIGADIER_FOLDER_ID = _extract_drive_folder_id(os.getenv("BRIGADIER_FOLDER_ID", ""))
+BRIG_EXPORT_PREFIX = os.getenv("BRIG_EXPORT_PREFIX", "Бригадиры")
+
 # Расписание автоматического экспорта (каждую неделю в понедельник в 9:00)
 AUTO_EXPORT_ENABLED = os.getenv("AUTO_EXPORT_ENABLED", "false").lower() == "true"
 AUTO_EXPORT_CRON = os.getenv("AUTO_EXPORT_CRON", "0 9 * * 1")  # каждый понедельник в 9:00
@@ -463,6 +467,31 @@ def init_db():
         )
         """)
 
+        # --- таблицы экспорта БРИГАДИРОВ (отдельно от обычных reports) ---
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS brig_google_exports(
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          brig_report_id INTEGER UNIQUE,
+          spreadsheet_id TEXT,
+          sheet_name    TEXT,
+          row_number    INTEGER,
+          exported_at   TEXT,
+          last_updated  TEXT,
+          FOREIGN KEY (brig_report_id) REFERENCES brigadier_reports(id)
+        )
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS brig_monthly_sheets(
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          year          INTEGER,
+          month         INTEGER,
+          spreadsheet_id TEXT,
+          sheet_url     TEXT,
+          created_at    TEXT,
+          UNIQUE(year, month)
+        )
+        """)
+
         # роли, которые может назначить админ (it/tim/brigadier)
         c.execute("""
         CREATE TABLE IF NOT EXISTS user_roles(
@@ -670,6 +699,8 @@ def purge_release_data() -> Dict[str, int]:
     tables = [
         "google_exports",
         "monthly_sheets",
+        "brig_google_exports",
+        "brig_monthly_sheets",
         "stat_msgs",
         "ui_state",
         "brigadier_reports",
@@ -1586,6 +1617,101 @@ def get_or_create_monthly_sheet(year: int, month: int):
         except HttpError as e:
             logging.error(f"Google API error: {e}")
             return None, None
+
+def get_or_create_brig_monthly_sheet(year: int, month: int):
+    """Получить или создать таблицу бригадиров для месяца (в BRIGADIER_FOLDER_ID)."""
+    if not BRIGADIER_FOLDER_ID:
+        return None, None
+    with connect() as con, closing(con.cursor()) as c:
+        row = c.execute(
+            "SELECT spreadsheet_id, sheet_url FROM brig_monthly_sheets WHERE year=? AND month=?",
+            (year, month)
+        ).fetchone()
+        if row:
+            return row[0], row[1]
+
+        try:
+            creds = get_google_credentials()
+            if not creds:
+                return None, None
+
+            drive = build("drive", "v3", credentials=creds)
+            sheets = build("sheets", "v4", credentials=creds)
+
+            month_names = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                           "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+            sheet_name = f"{BRIG_EXPORT_PREFIX} - {month_names[month]} {year}"
+
+            file_metadata = {
+                "name": sheet_name,
+                "mimeType": "application/vnd.google-apps.spreadsheet",
+                "parents": [BRIGADIER_FOLDER_ID],
+            }
+
+            def create_file():
+                return drive.files().create(
+                    body=file_metadata,
+                    fields="id, webViewLink"
+                ).execute()
+
+            file = retry_google_api_call(create_file)
+            spreadsheet_id = file["id"]
+            sheet_url = file["webViewLink"]
+
+            headers = [[
+                "Дата создания",
+                "User ID",
+                "Имя",
+                "Культура",
+                "Поле",
+                "Смена",
+                "Рядов",
+                "Мешков",
+                "Людей",
+                "Дата работы",
+            ]]
+
+            def update_headers():
+                return sheets.spreadsheets().values().update(
+                    spreadsheetId=spreadsheet_id,
+                    range="A1:J1",
+                    valueInputOption="RAW",
+                    body={"values": headers}
+                ).execute()
+
+            retry_google_api_call(update_headers)
+
+            # форматирование заголовков
+            requests = [{
+                "repeatCell": {
+                    "range": {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 1},
+                    "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                    "fields": "userEnteredFormat.textFormat.bold"
+                }
+            }]
+
+            def format_headers():
+                return sheets.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body={"requests": requests}
+                ).execute()
+
+            retry_google_api_call(format_headers)
+
+            c.execute(
+                "INSERT INTO brig_monthly_sheets(year, month, spreadsheet_id, sheet_url, created_at) VALUES(?,?,?,?,?)",
+                (year, month, spreadsheet_id, sheet_url, datetime.now().isoformat())
+            )
+            con.commit()
+            logging.info(f"Created brig sheet for {year}-{month:02d}: {sheet_url}")
+            return spreadsheet_id, sheet_url
+
+        except HttpError as e:
+            logging.error(f"Google API error (brig sheet): {e}")
+            return None, None
+        except Exception as e:
+            logging.error(f"Error creating brig sheet: {e}")
+            return None, None
         except Exception as e:
             logging.error(f"Error creating sheet: {e}")
             return None, None
@@ -1614,6 +1740,212 @@ def get_deleted_reports():
         WHERE r.id IS NULL
         """).fetchall()
         return rows
+
+def get_brig_reports_to_export():
+    """Получить список бригадирских отчетов для экспорта (новые/измененные/удаленные)."""
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute("""
+        SELECT br.id,
+               br.created_at,
+               COALESCE(u.phone, '') AS phone,
+               COALESCE(u.full_name, br.username, '') AS name,
+               br.work_type,
+               br.field,
+               br.shift,
+               br.rows,
+               br.bags,
+               br.workers,
+               br.work_date,
+               ge.brig_report_id as is_exported,
+               ge.row_number,
+               ge.last_updated
+        FROM brigadier_reports br
+        LEFT JOIN users u ON u.user_id = br.user_id
+        LEFT JOIN brig_google_exports ge ON br.id = ge.brig_report_id
+        ORDER BY br.work_date, br.created_at
+        """).fetchall()
+        return rows
+
+def get_deleted_brig_reports():
+    """Удаленные бригадирские отчеты, которые нужно удалить из Google Sheets."""
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute("""
+        SELECT ge.brig_report_id, ge.spreadsheet_id, ge.row_number
+        FROM brig_google_exports ge
+        LEFT JOIN brigadier_reports br ON ge.brig_report_id = br.id
+        WHERE br.id IS NULL
+        """).fetchall()
+        return rows
+
+def export_brigadier_reports_to_sheets():
+    """
+    Экспортировать бригадирские отчёты в Google Sheets (в BRIGADIER_FOLDER_ID).
+    Не использует DRIVE_FOLDER_ID и не пишет в общую папку.
+    """
+    if not BRIGADIER_FOLDER_ID:
+        return 0, "BRIGADIER_FOLDER_ID не задан — экспорт бригадиров выключен"
+    try:
+        creds = get_google_credentials()
+        if not creds:
+            return 0, "Ошибка авторизации Google"
+
+        sheets_service = build("sheets", "v4", credentials=creds)
+        drive = build("drive", "v3", credentials=creds)
+
+        all_reports = get_brig_reports_to_export()
+        deleted_reports = get_deleted_brig_reports()
+
+        if not all_reports and not deleted_reports:
+            return 0, "Нет бригадирских отчетов для экспорта"
+
+        reports_by_month = {}
+        for row in all_reports:
+            (rid, created_at, phone, name, work_type, field, shift, rows, bags, workers,
+             work_date, is_exported, row_number, last_updated) = row
+            d = datetime.fromisoformat(work_date)
+            key = (d.year, d.month)
+            reports_by_month.setdefault(key, []).append(
+                (rid, created_at, phone, name, work_type, field, shift, rows, bags, workers,
+                 work_date, is_exported, row_number, last_updated)
+            )
+
+        total_exported = 0
+        total_updated = 0
+        total_deleted = 0
+
+        # удаленные
+        for report_id, spreadsheet_id, row_number in deleted_reports:
+            try:
+                def delete_row():
+                    return sheets_service.spreadsheets().batchUpdate(
+                        spreadsheetId=spreadsheet_id,
+                        body={"requests": [{
+                            "deleteDimension": {
+                                "range": {
+                                    "sheetId": 0,
+                                    "dimension": "ROWS",
+                                    "startIndex": row_number - 1,
+                                    "endIndex": row_number
+                                }
+                            }
+                        }]}
+                    ).execute()
+
+                retry_google_api_call(delete_row)
+                with connect() as con, closing(con.cursor()) as c:
+                    c.execute("DELETE FROM brig_google_exports WHERE brig_report_id=?", (report_id,))
+                    con.commit()
+                total_deleted += 1
+            except Exception as e:
+                logging.error(f"Error deleting brig report {report_id}: {e}")
+
+        for (year, month), reports in reports_by_month.items():
+            spreadsheet_id, sheet_url = get_or_create_brig_monthly_sheet(year, month)
+            if not spreadsheet_id:
+                continue
+
+            # обновляем имя файла (стабильно)
+            try:
+                month_names = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                               "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+                new_name = f"{BRIG_EXPORT_PREFIX} - {month_names[month]} {year}"
+
+                def update_sheet_name():
+                    return drive.files().update(fileId=spreadsheet_id, body={"name": new_name}).execute()
+
+                retry_google_api_call(update_sheet_name)
+            except Exception:
+                pass
+
+            def get_existing_data():
+                return sheets_service.spreadsheets().values().get(
+                    spreadsheetId=spreadsheet_id,
+                    range="A:J"
+                ).execute()
+
+            try:
+                result = retry_google_api_call(get_existing_data)
+                existing_values = result.get("values", []) if result else []
+                next_row = len(existing_values) + 1
+            except Exception:
+                next_row = 2
+
+            for (rid, created_at, phone, name, work_type, field, shift, rows, bags, workers,
+                 work_date, is_exported, row_number, last_updated) in reports:
+                values = [
+                    created_at,
+                    phone,
+                    name,
+                    work_type,
+                    field,
+                    shift,
+                    rows if rows is not None else "",
+                    bags if bags is not None else "",
+                    workers if workers is not None else "",
+                    work_date,
+                ]
+
+                if is_exported and row_number:
+                    def update_record():
+                        return sheets_service.spreadsheets().values().update(
+                            spreadsheetId=spreadsheet_id,
+                            range=f"A{row_number}:J{row_number}",
+                            valueInputOption="RAW",
+                            body={"values": [values]}
+                        ).execute()
+                    try:
+                        retry_google_api_call(update_record)
+                        now = datetime.now().isoformat()
+                        with connect() as con, closing(con.cursor()) as c:
+                            c.execute(
+                                "UPDATE brig_google_exports SET last_updated=? WHERE brig_report_id=?",
+                                (now, rid)
+                            )
+                            con.commit()
+                        total_updated += 1
+                    except Exception as e:
+                        logging.error(f"Error updating brig report {rid}: {e}")
+                else:
+                    def add_record():
+                        return sheets_service.spreadsheets().values().update(
+                            spreadsheetId=spreadsheet_id,
+                            range=f"A{next_row}:J{next_row}",
+                            valueInputOption="RAW",
+                            body={"values": [values]}
+                        ).execute()
+                    try:
+                        retry_google_api_call(add_record)
+                        now = datetime.now().isoformat()
+                        with connect() as con, closing(con.cursor()) as c:
+                            c.execute(
+                                "INSERT INTO brig_google_exports(brig_report_id, spreadsheet_id, sheet_name, row_number, exported_at, last_updated) "
+                                "VALUES(?,?,?,?,?,?)",
+                                (rid, spreadsheet_id, f"{year}-{month:02d}", next_row, now, now)
+                            )
+                            con.commit()
+                        total_exported += 1
+                        next_row += 1
+                    except Exception as e:
+                        logging.error(f"Error adding brig report {rid}: {e}")
+
+        messages = []
+        if total_exported > 0:
+            messages.append(f"Добавлено: {total_exported}")
+        if total_updated > 0:
+            messages.append(f"Обновлено: {total_updated}")
+        if total_deleted > 0:
+            messages.append(f"Удалено: {total_deleted}")
+
+        if messages:
+            return total_exported + total_updated + total_deleted, "Бригадиры: " + ", ".join(messages)
+        return 0, "Бригадиры: нет изменений"
+
+    except HttpError as e:
+        logging.error(f"Google API error during brig export: {e}")
+        return 0, f"Ошибка Google API (бригадиры): {str(e)}"
+    except Exception as e:
+        logging.error(f"Error during brig export: {e}")
+        return 0, f"Ошибка экспорта (бригадиры): {str(e)}"
 
 def export_reports_to_sheets():
     """Экспортировать отчеты в Google Sheets с учетом изменений и удалений"""
@@ -8086,12 +8418,19 @@ async def adm_export(c: CallbackQuery):
     
     # Выполняем экспорт в отдельном потоке, чтобы не блокировать бота
     try:
-        count, message = await asyncio.to_thread(export_reports_to_sheets)
-        
-        if count > 0:
-            text = f"✅ {message}"
+        count1, msg1 = await asyncio.to_thread(export_reports_to_sheets)
+        count2, msg2 = await asyncio.to_thread(export_brigadier_reports_to_sheets)
+
+        parts = []
+        if count1 > 0:
+            parts.append("✅ " + msg1)
         else:
-            text = f"ℹ️ {message}"
+            parts.append("ℹ️ " + msg1)
+        if count2 > 0:
+            parts.append("✅ " + msg2)
+        else:
+            parts.append("ℹ️ " + msg2)
+        text = "\n".join(parts)
         
         # Проверяем и создаем таблицу для следующего месяца
         created, sheet_msg = await asyncio.to_thread(check_and_create_next_month_sheet)
@@ -8127,8 +8466,10 @@ async def scheduled_export():
     """Задача для автоматического экспорта"""
     try:
         logging.info("Running scheduled export...")
-        count, message = export_reports_to_sheets()
-        logging.info(f"Scheduled export result: {message}")
+        c1, m1 = export_reports_to_sheets()
+        c2, m2 = export_brigadier_reports_to_sheets()
+        logging.info(f"Scheduled export OTD: {m1}")
+        logging.info(f"Scheduled export BRIG: {m2}")
         
         # Проверяем создание таблицы для следующего месяца
         created, sheet_msg = check_and_create_next_month_sheet()
