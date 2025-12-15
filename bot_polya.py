@@ -156,6 +156,27 @@ BRIG_USERNAMES = set(
 
 DB_PATH = os.path.join(os.getcwd(), "reports.db")
 
+# --- helpers: env parsing ---
+def _extract_drive_folder_id(value: str) -> str:
+    """
+    Позволяем задавать DRIVE_FOLDER_ID как "чистый ID" или как URL папки.
+    Примеры:
+      - 1AbC...XyZ
+      - https://drive.google.com/drive/folders/1AbC...XyZ
+    """
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if "drive.google.com" not in v:
+        return v
+    # находим /folders/<id>
+    marker = "/folders/"
+    if marker in v:
+        tail = v.split(marker, 1)[1]
+        folder_id = tail.split("?", 1)[0].split("/", 1)[0].strip()
+        return folder_id
+    return v
+
 # Google Sheets настройки
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
@@ -163,8 +184,8 @@ GOOGLE_SCOPES = [
 ]
 OAUTH_CLIENT_JSON = os.getenv("OAUTH_CLIENT_JSON", "oauth_client.json")
 TOKEN_JSON_PATH = Path(os.getenv("TOKEN_JSON_PATH", "token.json"))
-DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "")
-EXPORT_PREFIX = os.getenv("EXPORT_PREFIX", "WorkLog")
+DRIVE_FOLDER_ID = _extract_drive_folder_id(os.getenv("DRIVE_FOLDER_ID", ""))
+EXPORT_PREFIX = os.getenv("EXPORT_PREFIX", "ОТД")
 
 # Расписание автоматического экспорта (каждую неделю в понедельник в 9:00)
 AUTO_EXPORT_ENABLED = os.getenv("AUTO_EXPORT_ENABLED", "false").lower() == "true"
@@ -317,6 +338,7 @@ def init_db():
           user_id    INTEGER PRIMARY KEY,
           full_name  TEXT,
           username   TEXT,
+          phone      TEXT,
           tz         TEXT,
           created_at TEXT
         )
@@ -360,8 +382,19 @@ def init_db():
         ucols = table_cols("users")
         if "username" not in ucols:
             c.execute("ALTER TABLE users ADD COLUMN username TEXT")
+        if "phone" not in ucols:
+            c.execute("ALTER TABLE users ADD COLUMN phone TEXT")
         if "tz" not in ucols:
             c.execute("ALTER TABLE users ADD COLUMN tz TEXT")
+        # уникальность телефона (если задан) — один номер = один пользователь
+        try:
+            c.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique "
+                "ON users(phone) WHERE phone IS NOT NULL AND TRIM(phone)<>''"
+            )
+        except sqlite3.IntegrityError:
+            # Если в старой базе уже есть дубли телефонов — не падаем.
+            logging.warning("Cannot create unique phone index (duplicates exist).")
 
         # reports
         rcols = table_cols("reports")
@@ -557,15 +590,19 @@ def upsert_user(user_id: int, full_name: Optional[str], tz: str, username: Optio
 
 def get_user(user_id: int):
     with connect() as con, closing(con.cursor()) as c:
-        r = c.execute("SELECT user_id, full_name, username, tz, created_at FROM users WHERE user_id=?", (user_id,)).fetchone()
+        r = c.execute(
+            "SELECT user_id, full_name, username, phone, tz, created_at FROM users WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
         if not r:
             return None
         return {
             "user_id": r[0],
             "full_name": r[1],
             "username": r[2],
-            "tz": r[3] or TZ,
-            "created_at": r[4],
+            "phone": r[3],
+            "tz": r[4] or TZ,
+            "created_at": r[5],
         }
 
 def find_user_by_username(username: str) -> Optional[dict]:
@@ -573,16 +610,94 @@ def find_user_by_username(username: str) -> Optional[dict]:
     if not uname:
         return None
     with connect() as con, closing(con.cursor()) as c:
-        r = c.execute("SELECT user_id, full_name, username, tz, created_at FROM users WHERE LOWER(username)=?", (uname,)).fetchone()
+        r = c.execute(
+            "SELECT user_id, full_name, username, phone, tz, created_at FROM users WHERE LOWER(username)=?",
+            (uname,),
+        ).fetchone()
         if not r:
             return None
         return {
             "user_id": r[0],
             "full_name": r[1],
             "username": r[2],
-            "tz": r[3] or TZ,
-            "created_at": r[4],
+            "phone": r[3],
+            "tz": r[4] or TZ,
+            "created_at": r[5],
         }
+
+def normalize_phone(raw: str) -> Optional[str]:
+    """
+    Нормализация телефона под формат WhatsApp UserID (как на скринах): 11 цифр, начинается с 7.
+    Принимаем:
+      - +7XXXXXXXXXX
+      - 8XXXXXXXXXX
+      - 9XXXXXXXXX (10 цифр, добавляем 7)
+    Возвращаем строку из цифр, например: "79898142076"
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if len(digits) == 10 and digits.startswith("9"):
+        digits = "7" + digits
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    if len(digits) == 11 and digits.startswith("7"):
+        return digits
+    return None
+
+def set_user_phone(user_id: int, phone: Optional[str]) -> bool:
+    """Сохранить телефон пользователю. Возвращает True если сохранено."""
+    phone = (phone or "").strip() or None
+    with connect() as con, closing(con.cursor()) as c:
+        try:
+            c.execute("UPDATE users SET phone=? WHERE user_id=?", (phone, user_id))
+            con.commit()
+            return True
+        except sqlite3.IntegrityError:
+            # например, номер уже занят другим пользователем (unique index)
+            return False
+
+def _has_phone(u: Optional[dict]) -> bool:
+    return bool((u or {}).get("phone") and str((u or {}).get("phone")).strip())
+
+def purge_release_data() -> Dict[str, int]:
+    """
+    Полная очистка пользовательских данных перед релизом:
+    - отчёты, регистрации, роли, связки экспортов
+    Не трогаем справочники (activities/locations/техника/культуры).
+    """
+    tables = [
+        "google_exports",
+        "monthly_sheets",
+        "stat_msgs",
+        "ui_state",
+        "brigadier_reports",
+        "brigadiers",
+        "user_roles",
+        "reports",
+        "users",
+    ]
+    counts: Dict[str, int] = {}
+    with connect() as con, closing(con.cursor()) as c:
+        for t in tables:
+            try:
+                r = c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()
+                counts[t] = int(r[0] or 0)
+            except Exception:
+                counts[t] = 0
+        for t in tables:
+            try:
+                c.execute(f"DELETE FROM {t}")
+            except Exception:
+                pass
+        # сброс автонумерации (не обязателен, но удобно)
+        try:
+            c.execute("DELETE FROM sqlite_sequence")
+        except Exception:
+            pass
+        con.commit()
+    return counts
 
 # -----------------------------
 # Роли
@@ -1388,11 +1503,10 @@ def get_or_create_monthly_sheet(year: int, month: int):
             drive = build("drive", "v3", credentials=creds)
             sheets = build("sheets", "v4", credentials=creds)
             
-            # Название таблицы с месяцем, годом и датой последнего обновления
+            # Название таблицы с месяцем и годом (как в WhatsApp-таблицах)
             month_names = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
                           "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
-            today = datetime.now().strftime("%d.%m.%Y")
-            sheet_name = f"{month_names[month]} {year} ({today})"
+            sheet_name = f"{EXPORT_PREFIX} - {month_names[month]} {year}"
             
             # Создаем таблицу с повторными попытками
             file_metadata = {
@@ -1413,13 +1527,21 @@ def get_or_create_monthly_sheet(year: int, month: int):
             spreadsheet_id = file["id"]
             sheet_url = file["webViewLink"]
             
-            # Добавляем заголовки с повторными попытками
-            headers = [["Дата", "Фамилия Имя", "Место работы", "Вид работы", "Количество часов"]]
+            # Добавляем заголовки (формат как на скринах: 7 колонок)
+            headers = [[
+                "Дата создания",
+                "User ID",
+                "Имя",
+                "Локация",
+                "Вид работы",
+                "Дата работы",
+                "Часы",
+            ]]
             
             def update_headers():
                 return sheets.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id,
-                    range="A1:E1",
+                    range="A1:G1",
                     valueInputOption="RAW",
                     body={"values": headers}
                 ).execute()
@@ -1473,9 +1595,10 @@ def get_reports_to_export():
     with connect() as con, closing(con.cursor()) as c:
         # Получаем все отчеты, которые нужно экспортировать
         rows = c.execute("""
-        SELECT r.id, r.work_date, r.reg_name, r.location, r.activity, r.hours, r.created_at,
+        SELECT r.id, r.created_at, COALESCE(u.phone, '') AS phone, r.reg_name, r.location, r.activity, r.work_date, r.hours,
                ge.report_id as is_exported, ge.row_number, ge.last_updated
         FROM reports r
+        LEFT JOIN users u ON u.user_id = r.user_id
         LEFT JOIN google_exports ge ON r.id = ge.report_id
         ORDER BY r.work_date, r.created_at
         """).fetchall()
@@ -1513,12 +1636,12 @@ def export_reports_to_sheets():
         # Группируем отчеты по месяцам
         reports_by_month = {}
         for row in all_reports:
-            report_id, work_date, name, location, activity, hours, created_at, is_exported, row_number, last_updated = row
+            report_id, created_at, phone, name, location, activity, work_date, hours, is_exported, row_number, last_updated = row
             d = datetime.fromisoformat(work_date)
             key = (d.year, d.month)
             if key not in reports_by_month:
                 reports_by_month[key] = []
-            reports_by_month[key].append((report_id, work_date, name, location, activity, hours, created_at, is_exported, row_number, last_updated))
+            reports_by_month[key].append((report_id, created_at, phone, name, location, activity, work_date, hours, is_exported, row_number, last_updated))
         
         total_exported = 0
         total_updated = 0
@@ -1570,8 +1693,7 @@ def export_reports_to_sheets():
             try:
                 month_names = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
                               "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
-                today = datetime.now().strftime("%d.%m.%Y")
-                new_name = f"{month_names[month]} {year} ({today})"
+                new_name = f"{EXPORT_PREFIX} - {month_names[month]} {year}"
                 
                 def update_sheet_name():
                     return drive.files().update(
@@ -1589,7 +1711,7 @@ def export_reports_to_sheets():
             def get_existing_data():
                 return sheets_service.spreadsheets().values().get(
                     spreadsheetId=spreadsheet_id,
-                    range="A:E"
+                    range="A:G"
                 ).execute()
             
             try:
@@ -1600,15 +1722,16 @@ def export_reports_to_sheets():
                 next_row = 2  # Начинаем со второй строки (после заголовков)
             
             # Обрабатываем отчеты
-            for report_id, work_date, name, location, activity, hours, created_at, is_exported, row_number, last_updated in reports:
-                values = [work_date, name, location, activity, hours]
+            for report_id, created_at, phone, name, location, activity, work_date, hours, is_exported, row_number, last_updated in reports:
+                # phone (UserID) — телефон. Если не указан, оставляем пустым (но в логах это будет видно).
+                values = [created_at, phone, name, location, activity, work_date, hours]
                 
                 if is_exported and row_number:
                     # Обновляем существующую запись с повторными попытками
                     def update_record():
                         return sheets_service.spreadsheets().values().update(
                             spreadsheetId=spreadsheet_id,
-                            range=f"A{row_number}:E{row_number}",
+                            range=f"A{row_number}:G{row_number}",
                             valueInputOption="RAW",
                             body={"values": [values]}
                         ).execute()
@@ -1635,7 +1758,7 @@ def export_reports_to_sheets():
                     def add_record():
                         return sheets_service.spreadsheets().values().update(
                             spreadsheetId=spreadsheet_id,
-                            range=f"A{next_row}:E{next_row}",
+                            range=f"A{next_row}:G{next_row}",
                             valueInputOption="RAW",
                             body={"values": [values]}
                         ).execute()
@@ -1719,6 +1842,10 @@ def check_and_create_next_month_sheet():
 
 class NameFSM(StatesGroup):
     waiting_name = State()
+
+class PhoneFSM(StatesGroup):
+    waiting_phone_text = State()
+    waiting_phone_contact = State()
 
 class WorkFSM(StatesGroup):
     pick_group = State()
@@ -2105,6 +2232,20 @@ def reply_menu_kb() -> ReplyKeyboardMarkup:
         one_time_keyboard=False,
     )
 
+def phone_contact_kb() -> ReplyKeyboardMarkup:
+    """
+    Кнопка, которая отправляет контакт СВОЕГО номера телефона боту.
+    Используем как подтверждение номера (аналог SMS-кода).
+    """
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 Отправить контакт", request_contact=True)],
+            [KeyboardButton(text="Отмена")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
 async def _ui_reset(bot: Bot, chat_id: int, user_id: int) -> None:
     """
     "Мягкий reset" UI: очищает ui_state (menu/content), пытается удалить UI-сообщения,
@@ -2400,6 +2541,7 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
 def settings_menu_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Сменить ФИО", callback_data="menu:name:change")
+    kb.button(text="📱 Номер телефона", callback_data="menu:phone")
     kb.button(text="🔙 Назад", callback_data="menu:root")
     kb.adjust(1)
     return kb.as_markup()
@@ -3142,6 +3284,79 @@ async def cmd_refresh_robot_banner(message: Message):
     await ensure_robot_banner(message.bot, force_new=True)
     await message.answer("Robot banner refreshed.")
 
+# --- profile requirements (ФИО + телефон) ---
+async def _prompt_phone_registration(message_or_cb, state: FSMContext, *, back_cb: str = "menu:root") -> None:
+    """
+    Просим пользователя указать телефон.
+    Важно: подтверждение номера делаем через "request_contact", поэтому корректно работает в личке.
+    """
+    # Определяем chat_id и bot
+    if isinstance(message_or_cb, CallbackQuery):
+        bot = message_or_cb.bot
+        chat = message_or_cb.message.chat
+        chat_id = message_or_cb.message.chat.id
+        user_id = message_or_cb.from_user.id
+    else:
+        bot = message_or_cb.bot
+        chat = message_or_cb.chat
+        chat_id = message_or_cb.chat.id
+        user_id = message_or_cb.from_user.id
+
+    # Лучше делать регистрацию телефона в личке (и подтверждение контактом тоже)
+    if getattr(chat, "type", None) != "private":
+        await _edit_or_send(
+            bot,
+            chat_id,
+            user_id,
+            "📱 Для регистрации телефона откройте бота <b>в личных сообщениях</b> и нажмите /start.\n\n"
+            "Там я попрошу номер и попрошу подтвердить его кнопкой «Отправить контакт».",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data=back_cb)]
+            ]),
+        )
+        return
+
+    await state.set_state(PhoneFSM.waiting_phone_text)
+    await _edit_or_send(
+        bot,
+        chat_id,
+        user_id,
+        "📱 Введите номер телефона (можно в любом формате: <b>+7</b>, <b>8</b> или просто <b>9XXXXXXXXX</b>).\n"
+        "После этого я попрошу подтвердить номер кнопкой «Отправить контакт».",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data=back_cb)]
+        ]),
+    )
+
+async def _require_profile(message_or_cb, state: FSMContext, *, back_cb: str = "menu:root") -> Optional[dict]:
+    """
+    Гарантирует, что пользователь:
+      1) указал ФИО
+      2) указал телефон (для Google Sheets UserID)
+    Если чего-то нет — переводим в соответствующее состояние и возвращаем None.
+    """
+    u = get_user(message_or_cb.from_user.id)
+    if not u or not (u.get("full_name") or "").strip():
+        await state.set_state(NameFSM.waiting_name)
+        await _edit_or_send(
+            message_or_cb.bot,
+            message_or_cb.message.chat.id if isinstance(message_or_cb, CallbackQuery) else message_or_cb.chat.id,
+            message_or_cb.from_user.id,
+            "Введите <b>Фамилию Имя</b> для регистрации.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data=back_cb)]
+            ]),
+        )
+        if isinstance(message_or_cb, CallbackQuery):
+            await message_or_cb.answer()
+        return None
+    if not _has_phone(u):
+        await _prompt_phone_registration(message_or_cb, state, back_cb=back_cb)
+        if isinstance(message_or_cb, CallbackQuery):
+            await message_or_cb.answer()
+        return None
+    return u
+
 # -------------- Команды --------------
 
 @router.message(CommandStart())
@@ -3163,6 +3378,11 @@ async def cmd_start(message: Message, state: FSMContext):
             message.from_user.id,
             "👋 Для начала введите <b>Фамилию Имя</b> (например: <b>Иванов Иван</b>).",
         )
+        return
+
+    # Телефон нужен для Google Sheets UserID (совместимость с WhatsApp)
+    if not _has_phone(u):
+        await _prompt_phone_registration(message, state, back_cb="menu:root")
         return
 
     await show_main_menu(message.chat.id, message.from_user.id, u, "Готово. Выберите пункт меню.")
@@ -3225,6 +3445,61 @@ async def cmd_reset(message: Message, state: FSMContext):
     await _ui_try_delete_user_message(message)
     await _ui_reset(message.bot, message.chat.id, message.from_user.id)
 
+@router.message(Command("purge_release"))
+async def cmd_purge_release(message: Message, state: FSMContext):
+    """
+    Админская команда: очистить все пользовательские данные перед релизом.
+    """
+    if not _is_allowed_topic(message):
+        return
+    if not is_admin(message):
+        return
+    await state.clear()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, очистить", callback_data="adm:purge_release:confirm")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="menu:root")],
+    ])
+    await message.answer(
+        "⚠️ <b>ВНИМАНИЕ</b>\n"
+        "Это удалит ВСЕ пользовательские данные из локальной базы:\n"
+        "- регистрации (ФИО/телефон)\n"
+        "- отчёты\n"
+        "- роли/бригадиров\n"
+        "- связи экспорта Google Sheets\n\n"
+        "Справочники (локации/работы/техника) останутся.\n\n"
+        "Продолжить?",
+        reply_markup=kb,
+    )
+
+@router.callback_query(F.data == "adm:purge_release:confirm")
+async def cb_purge_release_confirm(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    await state.clear()
+    counts = purge_release_data()
+    lines = ["✅ Очищено. Удалено записей:"]
+    for k in [
+        "users",
+        "reports",
+        "user_roles",
+        "brigadiers",
+        "brigadier_reports",
+        "google_exports",
+        "monthly_sheets",
+        "stat_msgs",
+        "ui_state",
+    ]:
+        lines.append(f"- {k}: <b>{counts.get(k, 0)}</b>")
+    await _edit_or_send(
+        c.bot,
+        c.message.chat.id,
+        c.from_user.id,
+        "\n".join(lines),
+        reply_markup=admin_menu_kb() if is_admin(c) else _ui_back_to_root_kb(),
+    )
+    await c.answer("Готово")
+
 @router.message(Command("menu"))
 async def cmd_menu(message: Message, state: FSMContext):
     # Проверяем разрешенную тему для команд
@@ -3240,6 +3515,9 @@ async def cmd_menu(message: Message, state: FSMContext):
             "Введите <b>Фамилию Имя</b> для регистрации (например: <b>Иванов Иван</b>).",
         )
         return
+    if not _has_phone(u):
+        await _prompt_phone_registration(message, state, back_cb="menu:root")
+        return
     
     # Стараемся удалить команду пользователя, чтобы не плодить мусор
     try:
@@ -3248,6 +3526,13 @@ async def cmd_menu(message: Message, state: FSMContext):
         pass
     
     await show_main_menu(message.chat.id, message.from_user.id, u, "Меню")
+
+@router.message(Command("phone"))
+async def cmd_phone(message: Message, state: FSMContext):
+    if not _is_allowed_topic(message):
+        return
+    await state.clear()
+    await _prompt_phone_registration(message, state, back_cb="menu:root")
 
 @router.message(Command("it"))
 async def cmd_it_menu(message: Message):
@@ -3390,12 +3675,15 @@ async def capture_full_name(message: Message, state: FSMContext):
     upsert_user(message.from_user.id, text, TZ, message.from_user.username or "")
     u = get_user(message.from_user.id)
     await state.clear()
-    
+
+    # После ФИО — просим телефон (нужен для Google Sheets UserID)
+    if not _has_phone(u):
+        await _prompt_phone_registration(message, state, back_cb=back_cb)
+        return
+
     if is_new_user:
-        # Первоначальная регистрация
         await show_main_menu(message.chat.id, message.from_user.id, u, f"✅ Зарегистрировано как: <b>{text}</b>")
     else:
-        # Изменение имени — возвращаем в главное меню
         await show_main_menu(message.chat.id, message.from_user.id, u, f"✏️ Имя изменено на: <b>{text}</b>")
 
 # -------------- Рисовалки экранов --------------
@@ -3552,12 +3840,8 @@ async def cb_menu_root(c: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "menu:work")
 async def cb_menu_work(c: CallbackQuery, state: FSMContext):
-    u = get_user(c.from_user.id)
-    if not u or not (u.get("full_name") or "").strip():
-        await state.set_state(NameFSM.waiting_name)
-        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                            "Введите <b>Фамилию Имя</b> для регистрации.")
-        await c.answer()
+    u = await _require_profile(c, state, back_cb="menu:root")
+    if not u:
         return
     
     # Определяем права администратора для выбора правильной клавиатуры
@@ -3612,19 +3896,7 @@ async def cb_menu_stats(c: CallbackQuery):
 # ---------------- ОТД (новый поток для работяг) ----------------
 
 async def _otd_require_user(message_or_cb, state: FSMContext) -> Optional[dict]:
-    u = get_user(message_or_cb.from_user.id)
-    if not u or not (u.get("full_name") or "").strip():
-        await state.set_state(NameFSM.waiting_name)
-        await _edit_or_send(
-            message_or_cb.bot,
-            message_or_cb.message.chat.id if isinstance(message_or_cb, CallbackQuery) else message_or_cb.chat.id,
-            message_or_cb.from_user.id,
-            "Введите <b>Фамилию Имя</b> для регистрации."
-        )
-        if isinstance(message_or_cb, CallbackQuery):
-            await message_or_cb.answer()
-        return None
-    return u
+    return await _require_profile(message_or_cb, state, back_cb="menu:root")
 
 async def _otd_to_confirm(bot: Bot, chat_id: int, user_id: int, state: FSMContext):
     data = await state.get_data()
@@ -6484,6 +6756,80 @@ async def cb_menu_name_change(c: CallbackQuery, state: FSMContext):
                         ]))
     await c.answer()
 
+@router.callback_query(F.data == "menu:phone")
+async def cb_menu_phone(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await _prompt_phone_registration(c, state, back_cb="menu:name")
+    await c.answer()
+
+@router.message(PhoneFSM.waiting_phone_text)
+async def capture_phone_text(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if raw.lower() in {"отмена", "cancel", "/cancel"}:
+        await state.clear()
+        await _ui_reset(message.bot, message.chat.id, message.from_user.id)
+        return
+
+    phone = normalize_phone(raw)
+    if not phone:
+        await message.answer(
+            "❌ Не понял номер.\n\n"
+            "Введите в любом формате: <b>+7XXXXXXXXXX</b>, <b>8XXXXXXXXXX</b> или <b>9XXXXXXXXX</b>.\n"
+            "Пример: <code>+7 989 834 1458</code>",
+        )
+        return
+
+    await state.update_data(pending_phone=phone)
+    await state.set_state(PhoneFSM.waiting_phone_contact)
+    await message.answer(
+        f"Теперь подтвердите номер <b>{phone}</b>.\n"
+        "Нажмите кнопку <b>«📱 Отправить контакт»</b> (она отправит ваш контакт с номером Telegram).",
+        reply_markup=phone_contact_kb(),
+    )
+
+@router.message(PhoneFSM.waiting_phone_contact, F.contact)
+async def capture_phone_contact(message: Message, state: FSMContext):
+    contact = message.contact
+    if not contact:
+        return
+
+    # request_contact отправляет контакт самого пользователя (user_id должен совпасть)
+    if getattr(contact, "user_id", None) and int(contact.user_id) != int(message.from_user.id):
+        await message.answer("❌ Нужно отправить <b>свой</b> контакт кнопкой «📱 Отправить контакт».")
+        return
+
+    phone_from_contact = normalize_phone(getattr(contact, "phone_number", "") or "")
+    if not phone_from_contact:
+        await message.answer("❌ Не смог прочитать номер из контакта. Попробуйте ещё раз.")
+        return
+
+    data = await state.get_data()
+    pending = (data.get("pending_phone") or "").strip()
+    if pending and phone_from_contact != pending:
+        await message.answer(
+            "❌ Номер из контакта не совпал с введённым.\n\n"
+            f"Введено: <b>{pending}</b>\n"
+            f"В контакте: <b>{phone_from_contact}</b>\n\n"
+            "Введите номер заново.",
+            reply_markup=reply_menu_kb(),
+        )
+        await state.set_state(PhoneFSM.waiting_phone_text)
+        return
+
+    ok = set_user_phone(message.from_user.id, phone_from_contact)
+    if not ok:
+        await message.answer(
+            "❌ Этот номер уже привязан к другому пользователю.\n"
+            "Если это ошибка — напишите администратору.",
+            reply_markup=reply_menu_kb(),
+        )
+        await state.set_state(PhoneFSM.waiting_phone_text)
+        return
+
+    await state.clear()
+    await message.answer(f"✅ Телефон сохранён: <b>{phone_from_contact}</b>", reply_markup=reply_menu_kb())
+    await _ui_reset(message.bot, message.chat.id, message.from_user.id)
+
 # -------------- Статистика кнопки --------------
 
 @router.callback_query(F.data == "stats:today")
@@ -7807,6 +8153,7 @@ async def main():
             BotCommand(command="today", description="Статистика за сегодня"),
             BotCommand(command="my", description="Моя статистика (неделя)"),
             BotCommand(command="menu", description="Открыть меню бота"),
+            BotCommand(command="phone", description="Указать/изменить номер телефона"),
             BotCommand(command="where", description="Показать chat_id и thread_id"),
             BotCommand(command="version", description="Версия бота (диагностика)"),
             BotCommand(command="init_hours", description="Инициализировать тему Часы (админ)"),

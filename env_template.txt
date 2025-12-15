@@ -27,10 +27,11 @@ TOKEN_JSON_PATH=token.json
 # ID папки на Google Drive, куда будут сохраняться таблицы
 # Получить ID папки: откройте папку на Drive, скопируйте ID из URL
 # https://drive.google.com/drive/folders/[ВОТ_ЭТО_ID]
+# Можно указать и полный URL папки — бот сам вытащит ID.
 DRIVE_FOLDER_ID=
 
-# Префикс для названия таблиц (по умолчанию "WorkLog")
-EXPORT_PREFIX=WorkLog
+# Префикс для названия таблиц (например: "ОТД" или "Бригадиры")
+EXPORT_PREFIX=ОТД
 
 # Включить автоматический экспорт (true/false)
 AUTO_EXPORT_ENABLED=false
