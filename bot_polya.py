@@ -195,6 +195,59 @@ BRIG_EXPORT_PREFIX = os.getenv("BRIG_EXPORT_PREFIX", "Бригадиры")
 AUTO_EXPORT_ENABLED = os.getenv("AUTO_EXPORT_ENABLED", "false").lower() == "true"
 AUTO_EXPORT_CRON = os.getenv("AUTO_EXPORT_CRON", "0 9 * * 1")  # каждый понедельник в 9:00
 
+# Моментальный автоэкспорт: после каждой записи/изменения/удаления
+AUTO_EXPORT_ON_CHANGE = os.getenv("AUTO_EXPORT_ON_CHANGE", "false").lower() == "true"
+try:
+    AUTO_EXPORT_ON_CHANGE_DEBOUNCE = float(os.getenv("AUTO_EXPORT_ON_CHANGE_DEBOUNCE", "3").strip() or "3")
+except Exception:
+    AUTO_EXPORT_ON_CHANGE_DEBOUNCE = 3.0
+
+# internal: coalesce export bursts
+_auto_export_task: Optional[asyncio.Task] = None
+_auto_export_lock: Optional[asyncio.Lock] = None
+_auto_export_again: bool = False
+
+def _auto_export_on_change(reason: str = "") -> None:
+    """
+    Запускает экспорт в Google Sheets в фоне (OTD + brig) с debounce, чтобы изменения
+    отражались "моментально" без ручного экспорта.
+    """
+    global _auto_export_task, _auto_export_lock, _auto_export_again
+    if not AUTO_EXPORT_ON_CHANGE:
+        return
+    # нужен event loop (вызов только из async-хендлеров)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if _auto_export_lock is None:
+        _auto_export_lock = asyncio.Lock()
+    _auto_export_again = True
+    if _auto_export_task and not _auto_export_task.done():
+        return
+
+    async def _worker():
+        global _auto_export_again
+        # coalesce rapid changes
+        while True:
+            await asyncio.sleep(max(0.0, AUTO_EXPORT_ON_CHANGE_DEBOUNCE))
+            if not _auto_export_again:
+                return
+            _auto_export_again = False
+            try:
+                assert _auto_export_lock is not None
+                async with _auto_export_lock:
+                    c1, m1 = await asyncio.to_thread(export_reports_to_sheets)
+                    c2, m2 = await asyncio.to_thread(export_brigadier_reports_to_sheets)
+                    logging.info(f"[auto-export] reason={reason or '-'} OTD: {m1} (n={c1}) | BRIG: {m2} (n={c2})")
+            except Exception as e:
+                logging.error(f"[auto-export] failed: {e}")
+            if _auto_export_again:
+                continue
+            return
+
+    _auto_export_task = loop.create_task(_worker())
+
 # Настройки чатов/топиков (форумов) из .env
 # - WORK_CHAT_ID: id супергруппы, где идёт «работа»
 # - WORK_TOPIC_ID: id топика с иконкой робота, где показываем меню/диалоги
@@ -4917,6 +4970,7 @@ async def otd_confirm_ok(c: CallbackQuery, state: FSMContext):
         await stats_notify_created(c.bot, rid)
     except Exception:
         pass
+    _auto_export_on_change("create_report(otd)")
     await state.clear()
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                         _format_otd_summary_with_title(work, "✅✅✅ <b>Успешно сохранено</b>"),
@@ -6115,6 +6169,7 @@ async def brig_confirm_save(c: CallbackQuery, state: FSMContext):
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                             "✅ ОБ сохранено",
                             reply_markup=_ui_back_to_root_kb())
+        _auto_export_on_change("create_brig_report(ob_v2)")
         await c.answer("Сохранено")
         return
     mode = brig.get("mode") or "hand"
@@ -6149,6 +6204,7 @@ async def brig_confirm_save(c: CallbackQuery, state: FSMContext):
     )
     await state.clear()
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, "✅ Отчет бригадира сохранен", reply_markup=_ui_back_to_root_kb())
+    _auto_export_on_change("create_brig_report")
     await c.answer("Сохранено")
 
 @router.callback_query(F.data == "brig:confirm:cancel")
@@ -7427,6 +7483,8 @@ async def pick_hours(c: CallbackQuery, state: FSMContext):
         await stats_notify_created(c.bot, rid)
     except Exception:
         pass
+    # Моментальная синхронизация в Google Sheets
+    _auto_export_on_change("create_report(work)")
     text = (
         "✅ <b>Сохранено</b>\n\n"
         f"Дата: <b>{work['work_date']}</b>\n"
@@ -7456,6 +7514,7 @@ async def cb_edit_delete(c: CallbackQuery):
             await stats_notify_deleted(c.bot, rid, deleted=before)
         except Exception:
             pass
+        _auto_export_on_change("delete_report")
     await cb_menu_edit(c)
 
 @router.callback_query(F.data.startswith("edit:chg:"))
@@ -7829,6 +7888,7 @@ async def cb_edit_hours_value(c: CallbackQuery, state: FSMContext):
             await stats_notify_changed(c.bot, rid, before=before)
         except Exception:
             pass
+        _auto_export_on_change("update_report(hours)")
         await c.answer("Обновлено")
         if queue_active:
             await _start_next_edit_in_queue(c.bot, c.message.chat.id, c.from_user.id, state)
@@ -7884,6 +7944,7 @@ async def cb_edit_location_final(c: CallbackQuery, state: FSMContext):
             await stats_notify_changed(c.bot, rid, before=before)
         except Exception:
             pass
+        _auto_export_on_change("update_report(location)")
         await c.answer("Локация обновлена")
         if queue_active:
             await _start_next_edit_in_queue(c.bot, c.message.chat.id, c.from_user.id, state)
@@ -7951,6 +8012,7 @@ async def cb_edit_activity_final(c: CallbackQuery, state: FSMContext):
                 await stats_notify_changed(c.bot, rid, before=before)
             except Exception:
                 pass
+            _auto_export_on_change("update_report(activity)")
             await c.answer("Вид работы обновлен")
             if queue_active:
                 await _start_next_edit_in_queue(c.bot, c.message.chat.id, c.from_user.id, state)
@@ -7993,6 +8055,7 @@ async def cb_edit_custom_activity(message: Message, state: FSMContext):
             await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
+        _auto_export_on_change("update_report(activity_custom)")
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
@@ -8027,6 +8090,7 @@ async def cb_edit_machine(message: Message, state: FSMContext):
             await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
+        _auto_export_on_change("update_report(machine)")
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
@@ -8058,6 +8122,7 @@ async def cb_edit_crop(message: Message, state: FSMContext):
             await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
+        _auto_export_on_change("update_report(crop)")
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
@@ -8090,6 +8155,7 @@ async def cb_edit_trips(message: Message, state: FSMContext):
             await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
+        _auto_export_on_change("update_report(trips)")
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
@@ -8129,6 +8195,7 @@ async def cb_edit_date(message: Message, state: FSMContext):
             await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
+        _auto_export_on_change("update_report(date)")
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
