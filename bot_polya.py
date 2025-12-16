@@ -164,6 +164,10 @@ BRIG_USERNAMES = set(
     if u.strip()
 )
 
+# Пользователи, чьи отчёты НЕ публикуем в общий чат/топик статистики,
+# но продолжаем сохранять в БД и выгружать в Google Sheets.
+HIDE_IDS = set(_parse_admin_ids(os.getenv("HIDE_IDS", "")))
+
 DB_PATH = os.path.join(os.getcwd(), "reports.db")
 
 # --- helpers: env parsing ---
@@ -2941,6 +2945,8 @@ async def stats_notify_created(bot: Bot, report_id:int):
     r = get_report(report_id)
     if not r:
         return
+    if int(r.get("user_id") or 0) in HIDE_IDS:
+        return
     chat_id, thread_id = await _stats_target()
     if not chat_id:
         return  # не настроено — тихо выходим
@@ -2954,6 +2960,8 @@ async def stats_notify_created(bot: Bot, report_id:int):
 async def stats_notify_changed(bot: Bot, report_id:int, before: Optional[dict] = None):
     r = get_report(report_id)
     if not r:
+        return
+    if int(r.get("user_id") or 0) in HIDE_IDS:
         return
     prev = stat_get_msg(report_id)
     chat_id, thread_id = await _stats_target()
@@ -2996,6 +3004,12 @@ async def stats_notify_deleted(bot: Bot, report_id:int, deleted: Optional[dict] 
             deleted_text = _format_report_line(deleted)
         except Exception:
             deleted_text = ""
+    # Если это скрытый пользователь — не публикуем удаление в общий чат
+    try:
+        if deleted and int(deleted.get("user_id") or 0) in HIDE_IDS:
+            return
+    except Exception:
+        pass
 
     delete_text = ("🗑 Удалена запись\n\n" + deleted_text) if deleted_text else f"🗑 Удалена запись\n\nID: <code>#{html.escape(str(report_id))}</code>"
 
