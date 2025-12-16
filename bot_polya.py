@@ -195,58 +195,13 @@ BRIG_EXPORT_PREFIX = os.getenv("BRIG_EXPORT_PREFIX", "Бригадиры")
 AUTO_EXPORT_ENABLED = os.getenv("AUTO_EXPORT_ENABLED", "false").lower() == "true"
 AUTO_EXPORT_CRON = os.getenv("AUTO_EXPORT_CRON", "0 9 * * 1")  # каждый понедельник в 9:00
 
-# Моментальный автоэкспорт: после каждой записи/изменения/удаления
-AUTO_EXPORT_ON_CHANGE = os.getenv("AUTO_EXPORT_ON_CHANGE", "false").lower() == "true"
-try:
-    AUTO_EXPORT_ON_CHANGE_DEBOUNCE = float(os.getenv("AUTO_EXPORT_ON_CHANGE_DEBOUNCE", "3").strip() or "3")
-except Exception:
-    AUTO_EXPORT_ON_CHANGE_DEBOUNCE = 3.0
-
-# internal: coalesce export bursts
-_auto_export_task: Optional[asyncio.Task] = None
-_auto_export_lock: Optional[asyncio.Lock] = None
-_auto_export_again: bool = False
-
-def _auto_export_on_change(reason: str = "") -> None:
-    """
-    Запускает экспорт в Google Sheets в фоне (OTD + brig) с debounce, чтобы изменения
-    отражались "моментально" без ручного экспорта.
-    """
-    global _auto_export_task, _auto_export_lock, _auto_export_again
-    if not AUTO_EXPORT_ON_CHANGE:
-        return
-    # нужен event loop (вызов только из async-хендлеров)
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    if _auto_export_lock is None:
-        _auto_export_lock = asyncio.Lock()
-    _auto_export_again = True
-    if _auto_export_task and not _auto_export_task.done():
-        return
-
-    async def _worker():
-        global _auto_export_again
-        # coalesce rapid changes
-        while True:
-            await asyncio.sleep(max(0.0, AUTO_EXPORT_ON_CHANGE_DEBOUNCE))
-            if not _auto_export_again:
-                return
-            _auto_export_again = False
-            try:
-                assert _auto_export_lock is not None
-                async with _auto_export_lock:
-                    c1, m1 = await asyncio.to_thread(export_reports_to_sheets)
-                    c2, m2 = await asyncio.to_thread(export_brigadier_reports_to_sheets)
-                    logging.info(f"[auto-export] reason={reason or '-'} OTD: {m1} (n={c1}) | BRIG: {m2} (n={c2})")
-            except Exception as e:
-                logging.error(f"[auto-export] failed: {e}")
-            if _auto_export_again:
-                continue
-            return
-
-    _auto_export_task = loop.create_task(_worker())
+# Моментальный экспорт при изменениях (создание/правка/удаление отчёта).
+# По умолчанию включается вместе с AUTO_EXPORT_ENABLED, но можно управлять отдельно.
+EXPORT_ON_CHANGE_ENABLED = os.getenv(
+    "EXPORT_ON_CHANGE_ENABLED",
+    ("true" if AUTO_EXPORT_ENABLED else "false"),
+).lower() == "true"
+EXPORT_ON_CHANGE_DEBOUNCE_SEC = int(os.getenv("EXPORT_ON_CHANGE_DEBOUNCE_SEC", "5"))
 
 # Настройки чатов/топиков (форумов) из .env
 # - WORK_CHAT_ID: id супергруппы, где идёт «работа»
@@ -1889,30 +1844,44 @@ def export_brigadier_reports_to_sheets():
         total_deleted = 0
 
         # удаленные
+        # Важно: deleteDimension сдвигает строки вверх, поэтому корректируем row_number в БД.
+        deleted_by_sheet: Dict[str, List[Tuple[int, int]]] = {}
         for report_id, spreadsheet_id, row_number in deleted_reports:
-            try:
-                def delete_row():
-                    return sheets_service.spreadsheets().batchUpdate(
-                        spreadsheetId=spreadsheet_id,
-                        body={"requests": [{
-                            "deleteDimension": {
-                                "range": {
-                                    "sheetId": 0,
-                                    "dimension": "ROWS",
-                                    "startIndex": row_number - 1,
-                                    "endIndex": row_number
-                                }
-                            }
-                        }]}
-                    ).execute()
+            if not spreadsheet_id or not row_number:
+                continue
+            deleted_by_sheet.setdefault(spreadsheet_id, []).append((int(report_id), int(row_number)))
 
-                retry_google_api_call(delete_row)
-                with connect() as con, closing(con.cursor()) as c:
-                    c.execute("DELETE FROM brig_google_exports WHERE brig_report_id=?", (report_id,))
-                    con.commit()
-                total_deleted += 1
-            except Exception as e:
-                logging.error(f"Error deleting brig report {report_id}: {e}")
+        for spreadsheet_id, items in deleted_by_sheet.items():
+            items.sort(key=lambda x: x[1], reverse=True)
+            for report_id, row_number in items:
+                try:
+                    def delete_row():
+                        return sheets_service.spreadsheets().batchUpdate(
+                            spreadsheetId=spreadsheet_id,
+                            body={"requests": [{
+                                "deleteDimension": {
+                                    "range": {
+                                        "sheetId": 0,
+                                        "dimension": "ROWS",
+                                        "startIndex": row_number - 1,
+                                        "endIndex": row_number
+                                    }
+                                }
+                            }]}
+                        ).execute()
+
+                    retry_google_api_call(delete_row)
+                    with connect() as con, closing(con.cursor()) as c:
+                        c.execute("DELETE FROM brig_google_exports WHERE brig_report_id=?", (report_id,))
+                        c.execute(
+                            "UPDATE brig_google_exports SET row_number = row_number - 1 "
+                            "WHERE spreadsheet_id=? AND row_number>?",
+                            (spreadsheet_id, row_number),
+                        )
+                        con.commit()
+                    total_deleted += 1
+                except Exception as e:
+                    logging.error(f"Error deleting brig report {report_id}: {e}")
 
         for (year, month), reports in reports_by_month.items():
             spreadsheet_id, sheet_url = get_or_create_brig_monthly_sheet(year, month)
@@ -2055,7 +2024,18 @@ def export_reports_to_sheets():
         total_deleted = 0
         
         # Обрабатываем удаленные записи
+        # Важно: при deleteDimension все строки ниже "поднимаются" на 1,
+        # поэтому нужно корректировать сохранённые row_number в БД.
+        deleted_by_sheet: Dict[str, List[Tuple[int, int]]] = {}
         for report_id, spreadsheet_id, row_number in deleted_reports:
+            if not spreadsheet_id or not row_number:
+                continue
+            deleted_by_sheet.setdefault(spreadsheet_id, []).append((int(report_id), int(row_number)))
+
+        for spreadsheet_id, items in deleted_by_sheet.items():
+            # Удаляем снизу вверх, чтобы индексы не "ехали" при множественных удалениях
+            items.sort(key=lambda x: x[1], reverse=True)
+            for report_id, row_number in items:
             try:
                 # Удаляем строку из таблицы с повторными попытками
                 def delete_row():
@@ -2080,6 +2060,12 @@ def export_reports_to_sheets():
                 # Удаляем запись из БД
                 with connect() as con, closing(con.cursor()) as c:
                     c.execute("DELETE FROM google_exports WHERE report_id=?", (report_id,))
+                    # Сдвигаем номера строк для оставшихся записей в этом spreadsheet
+                    c.execute(
+                        "UPDATE google_exports SET row_number = row_number - 1 "
+                        "WHERE spreadsheet_id=? AND row_number>? ",
+                        (spreadsheet_id, row_number),
+                    )
                     con.commit()
                 
                 total_deleted += 1
@@ -4970,7 +4956,10 @@ async def otd_confirm_ok(c: CallbackQuery, state: FSMContext):
         await stats_notify_created(c.bot, rid)
     except Exception:
         pass
-    _auto_export_on_change("create_report(otd)")
+    try:
+        await request_export_soon(otd=True, brig=False, reason="otd:create")
+    except Exception:
+        pass
     await state.clear()
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                         _format_otd_summary_with_title(work, "✅✅✅ <b>Успешно сохранено</b>"),
@@ -6165,11 +6154,14 @@ async def brig_confirm_save(c: CallbackQuery, state: FSMContext):
             workers=workers,
             work_date=work_date,
         )
+        try:
+            await request_export_soon(otd=False, brig=True, reason="brig:create")
+        except Exception:
+            pass
         await state.clear()
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                             "✅ ОБ сохранено",
                             reply_markup=_ui_back_to_root_kb())
-        _auto_export_on_change("create_brig_report(ob_v2)")
         await c.answer("Сохранено")
         return
     mode = brig.get("mode") or "hand"
@@ -6202,9 +6194,12 @@ async def brig_confirm_save(c: CallbackQuery, state: FSMContext):
         workers=workers,
         work_date=brig.get("work_date") or date.today().isoformat(),
     )
+    try:
+        await request_export_soon(otd=False, brig=True, reason="brig:create")
+    except Exception:
+        pass
     await state.clear()
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, "✅ Отчет бригадира сохранен", reply_markup=_ui_back_to_root_kb())
-    _auto_export_on_change("create_brig_report")
     await c.answer("Сохранено")
 
 @router.callback_query(F.data == "brig:confirm:cancel")
@@ -7483,8 +7478,10 @@ async def pick_hours(c: CallbackQuery, state: FSMContext):
         await stats_notify_created(c.bot, rid)
     except Exception:
         pass
-    # Моментальная синхронизация в Google Sheets
-    _auto_export_on_change("create_report(work)")
+    try:
+        await request_export_soon(otd=True, brig=False, reason="otd:create")
+    except Exception:
+        pass
     text = (
         "✅ <b>Сохранено</b>\n\n"
         f"Дата: <b>{work['work_date']}</b>\n"
@@ -7514,7 +7511,10 @@ async def cb_edit_delete(c: CallbackQuery):
             await stats_notify_deleted(c.bot, rid, deleted=before)
         except Exception:
             pass
-        _auto_export_on_change("delete_report")
+        try:
+            await request_export_soon(otd=True, brig=False, reason="otd:delete")
+        except Exception:
+            pass
     await cb_menu_edit(c)
 
 @router.callback_query(F.data.startswith("edit:chg:"))
@@ -7888,7 +7888,10 @@ async def cb_edit_hours_value(c: CallbackQuery, state: FSMContext):
             await stats_notify_changed(c.bot, rid, before=before)
         except Exception:
             pass
-        _auto_export_on_change("update_report(hours)")
+        try:
+            await request_export_soon(otd=True, brig=False, reason="otd:update")
+        except Exception:
+            pass
         await c.answer("Обновлено")
         if queue_active:
             await _start_next_edit_in_queue(c.bot, c.message.chat.id, c.from_user.id, state)
@@ -7944,7 +7947,10 @@ async def cb_edit_location_final(c: CallbackQuery, state: FSMContext):
             await stats_notify_changed(c.bot, rid, before=before)
         except Exception:
             pass
-        _auto_export_on_change("update_report(location)")
+        try:
+            await request_export_soon(otd=True, brig=False, reason="otd:update")
+        except Exception:
+            pass
         await c.answer("Локация обновлена")
         if queue_active:
             await _start_next_edit_in_queue(c.bot, c.message.chat.id, c.from_user.id, state)
@@ -8012,7 +8018,10 @@ async def cb_edit_activity_final(c: CallbackQuery, state: FSMContext):
                 await stats_notify_changed(c.bot, rid, before=before)
             except Exception:
                 pass
-            _auto_export_on_change("update_report(activity)")
+            try:
+                await request_export_soon(otd=True, brig=False, reason="otd:update")
+            except Exception:
+                pass
             await c.answer("Вид работы обновлен")
             if queue_active:
                 await _start_next_edit_in_queue(c.bot, c.message.chat.id, c.from_user.id, state)
@@ -8055,7 +8064,10 @@ async def cb_edit_custom_activity(message: Message, state: FSMContext):
             await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
-        _auto_export_on_change("update_report(activity_custom)")
+        try:
+            await request_export_soon(otd=True, brig=False, reason="otd:update")
+        except Exception:
+            pass
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
@@ -8090,7 +8102,10 @@ async def cb_edit_machine(message: Message, state: FSMContext):
             await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
-        _auto_export_on_change("update_report(machine)")
+        try:
+            await request_export_soon(otd=True, brig=False, reason="otd:update")
+        except Exception:
+            pass
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
@@ -8122,7 +8137,10 @@ async def cb_edit_crop(message: Message, state: FSMContext):
             await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
-        _auto_export_on_change("update_report(crop)")
+        try:
+            await request_export_soon(otd=True, brig=False, reason="otd:update")
+        except Exception:
+            pass
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
@@ -8155,7 +8173,10 @@ async def cb_edit_trips(message: Message, state: FSMContext):
             await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
-        _auto_export_on_change("update_report(trips)")
+        try:
+            await request_export_soon(otd=True, brig=False, reason="otd:update")
+        except Exception:
+            pass
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
@@ -8195,7 +8216,10 @@ async def cb_edit_date(message: Message, state: FSMContext):
             await stats_notify_changed(message.bot, int(rid), before=before)
         except Exception:
             pass
-        _auto_export_on_change("update_report(date)")
+        try:
+            await request_export_soon(otd=True, brig=False, reason="otd:update")
+        except Exception:
+            pass
         if queue_active:
             await _start_next_edit_in_queue(message.bot, message.chat.id, message.from_user.id, state)
         else:
@@ -8507,8 +8531,9 @@ async def adm_export(c: CallbackQuery):
     
     # Выполняем экспорт в отдельном потоке, чтобы не блокировать бота
     try:
-        count1, msg1 = await asyncio.to_thread(export_reports_to_sheets)
-        count2, msg2 = await asyncio.to_thread(export_brigadier_reports_to_sheets)
+        async with _export_lock:
+            count1, msg1 = await asyncio.to_thread(export_reports_to_sheets)
+            count2, msg2 = await asyncio.to_thread(export_brigadier_reports_to_sheets)
         
         parts = []
         if count1 > 0:
@@ -8551,17 +8576,88 @@ bot: Bot
 dp: Dispatcher
 scheduler: Optional[AsyncIOScheduler] = None
 
+# -----------------------------
+# Export-on-change (debounced)
+# -----------------------------
+_export_lock = asyncio.Lock()
+_export_task: Optional[asyncio.Task] = None
+_export_last_request_ts: float = 0.0
+_export_pending = {"otd": False, "brig": False}
+
+
+async def request_export_soon(*, otd: bool = True, brig: bool = True, reason: str = "") -> None:
+    """
+    Дебаунсим экспорт в Google Sheets при изменениях в БД:
+    - любое количество изменений за короткий промежуток объединяем в 1 экспорт
+    - выполняем экспорт в отдельном потоке (to_thread), чтобы не блокировать polling
+    """
+    global _export_task, _export_last_request_ts
+
+    if not EXPORT_ON_CHANGE_ENABLED:
+        return
+
+    loop = asyncio.get_running_loop()
+    _export_last_request_ts = loop.time()
+    if otd:
+        _export_pending["otd"] = True
+    if brig:
+        _export_pending["brig"] = True
+
+    # если воркер ещё не запущен — запускаем
+    if _export_task is None or _export_task.done():
+        _export_task = asyncio.create_task(_export_worker(), name="export_on_change")
+
+    if reason:
+        logging.info(f"[export-on-change] requested ({reason})")
+
+
+async def _export_worker() -> None:
+    global _export_task
+    loop = asyncio.get_running_loop()
+    debounce = max(1, int(EXPORT_ON_CHANGE_DEBOUNCE_SEC))
+
+    while True:
+        await asyncio.sleep(debounce)
+        if loop.time() - _export_last_request_ts < debounce:
+            # за время сна пришли новые изменения — подождём ещё
+            continue
+
+        do_otd = bool(_export_pending.get("otd"))
+        do_brig = bool(_export_pending.get("brig"))
+        _export_pending["otd"] = False
+        _export_pending["brig"] = False
+
+        if not do_otd and not do_brig:
+            break
+
+        try:
+            async with _export_lock:
+                if do_otd:
+                    await asyncio.to_thread(export_reports_to_sheets)
+                    await asyncio.to_thread(check_and_create_next_month_sheet)
+                if do_brig:
+                    await asyncio.to_thread(export_brigadier_reports_to_sheets)
+        except Exception as e:
+            logging.error(f"[export-on-change] export failed: {e}")
+
+        # если за время экспорта не пришли новые изменения — выходим
+        if loop.time() - _export_last_request_ts >= debounce and not _export_pending["otd"] and not _export_pending["brig"]:
+            break
+
+    _export_task = None
+
 async def scheduled_export():
     """Задача для автоматического экспорта"""
     try:
         logging.info("Running scheduled export...")
-        c1, m1 = export_reports_to_sheets()
-        c2, m2 = export_brigadier_reports_to_sheets()
+        async with _export_lock:
+            c1, m1 = await asyncio.to_thread(export_reports_to_sheets)
+            c2, m2 = await asyncio.to_thread(export_brigadier_reports_to_sheets)
         logging.info(f"Scheduled export OTD: {m1}")
         logging.info(f"Scheduled export BRIG: {m2}")
         
         # Проверяем создание таблицы для следующего месяца
-        created, sheet_msg = check_and_create_next_month_sheet()
+        created, sheet_msg = await asyncio.to_thread(check_and_create_next_month_sheet)
         if created:
             logging.info(sheet_msg)
             
