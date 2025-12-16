@@ -97,20 +97,30 @@ def _read_git_short_sha(repo_dir: Path) -> Optional[str]:
     except Exception:
         return None
 
+def _safe_file_mtime_str(path: Path) -> str:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "unknown"
+
+# These are captured ON PROCESS START (import time) to prove what code is actually running.
+_BOOT_REPO_DIR = Path(__file__).resolve().parent
+BOOT_SHA = _read_git_short_sha(_BOOT_REPO_DIR) or os.getenv("GIT_SHA", "").strip() or "unknown"
+BOOT_FILE_MTIME = _safe_file_mtime_str(Path(__file__))
+
 def _runtime_version_info(user_id: int, username: Optional[str]) -> str:
     repo_dir = Path(__file__).resolve().parent
     # Prefer the actual working tree SHA when `.git` is available; env var can be stale.
     sha = _read_git_short_sha(repo_dir) or os.getenv("GIT_SHA", "").strip() or "unknown"
-    try:
-        mtime = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        mtime = "unknown"
+    mtime = _safe_file_mtime_str(Path(__file__))
     role = get_role_label(user_id)
     uname = (username or "").lstrip("@")
     return (
-        f"version: <code>{sha}</code>\n"
+        f"version(disk): <code>{sha}</code>\n"
+        f"version(boot): <code>{BOOT_SHA}</code>\n"
         f"started: <code>{STARTED_AT.strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
-        f"file_mtime: <code>{mtime}</code>\n"
+        f"file_mtime(disk): <code>{mtime}</code>\n"
+        f"file_mtime(boot): <code>{BOOT_FILE_MTIME}</code>\n"
         f"role: <code>{role}</code>\n"
         f"user: <code>{user_id}</code> @{uname if uname else '-'}"
     )
