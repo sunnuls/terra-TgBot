@@ -1376,69 +1376,101 @@ def user_recent_24h_reports(user_id:int) -> List[tuple]:
 
 def delete_report(report_id:int, user_id:int) -> bool:
     with connect() as con, closing(con.cursor()) as c:
-        # Проверяем, существует ли отчет
-        report = c.execute("SELECT id FROM reports WHERE id=? AND user_id=?", (report_id, user_id)).fetchone()
+        # Проверяем, существует ли отчет и что есть права на удаление.
+        # Для админа — можно удалить любую запись.
+        if _is_admin_user_id(user_id):
+            report = c.execute("SELECT id FROM reports WHERE id=?", (report_id,)).fetchone()
+        else:
+            report = c.execute("SELECT id FROM reports WHERE id=? AND user_id=?", (report_id, user_id)).fetchone()
         if not report:
             return False
         
         # Удаляем отчет
-        cur = c.execute("DELETE FROM reports WHERE id=? AND user_id=?", (report_id, user_id))
+        if _is_admin_user_id(user_id):
+            cur = c.execute("DELETE FROM reports WHERE id=?", (report_id,))
+        else:
+            cur = c.execute("DELETE FROM reports WHERE id=? AND user_id=?", (report_id, user_id))
         con.commit()
         return cur.rowcount > 0
 
 def update_report_hours(report_id:int, user_id:int, new_hours:int) -> bool:
     with connect() as con, closing(con.cursor()) as c:
-        cur = c.execute("UPDATE reports SET hours=? WHERE id=? AND user_id=?", (new_hours, report_id, user_id))
+        if _is_admin_user_id(user_id):
+            cur = c.execute("UPDATE reports SET hours=? WHERE id=?", (new_hours, report_id))
+        else:
+            cur = c.execute("UPDATE reports SET hours=? WHERE id=? AND user_id=?", (new_hours, report_id, user_id))
         con.commit()
         return cur.rowcount > 0
 
 def update_report_location(report_id:int, user_id:int, new_location:str, new_location_grp:str) -> bool:
     with connect() as con, closing(con.cursor()) as c:
-        cur = c.execute("UPDATE reports SET location=?, location_grp=? WHERE id=? AND user_id=?", 
-                       (new_location, new_location_grp, report_id, user_id))
+        if _is_admin_user_id(user_id):
+            cur = c.execute(
+                "UPDATE reports SET location=?, location_grp=? WHERE id=?",
+                (new_location, new_location_grp, report_id),
+            )
+        else:
+            cur = c.execute(
+                "UPDATE reports SET location=?, location_grp=? WHERE id=? AND user_id=?",
+                (new_location, new_location_grp, report_id, user_id),
+            )
         con.commit()
         return cur.rowcount > 0
 
 def update_report_activity(report_id:int, user_id:int, new_activity:str, new_activity_grp:str) -> bool:
     with connect() as con, closing(con.cursor()) as c:
-        cur = c.execute("UPDATE reports SET activity=?, activity_grp=? WHERE id=? AND user_id=?", 
-                       (new_activity, new_activity_grp, report_id, user_id))
+        if _is_admin_user_id(user_id):
+            cur = c.execute(
+                "UPDATE reports SET activity=?, activity_grp=? WHERE id=?",
+                (new_activity, new_activity_grp, report_id),
+            )
+        else:
+            cur = c.execute(
+                "UPDATE reports SET activity=?, activity_grp=? WHERE id=? AND user_id=?",
+                (new_activity, new_activity_grp, report_id, user_id),
+            )
         con.commit()
         return cur.rowcount > 0
 
 def update_report_machine(report_id:int, user_id:int, machine_type:Optional[str], machine_name:Optional[str]) -> bool:
     with connect() as con, closing(con.cursor()) as c:
-        cur = c.execute(
-            "UPDATE reports SET machine_type=?, machine_name=? WHERE id=? AND user_id=?",
-            (machine_type, machine_name, report_id, user_id)
-        )
+        if _is_admin_user_id(user_id):
+            cur = c.execute(
+                "UPDATE reports SET machine_type=?, machine_name=? WHERE id=?",
+                (machine_type, machine_name, report_id),
+            )
+        else:
+            cur = c.execute(
+                "UPDATE reports SET machine_type=?, machine_name=? WHERE id=? AND user_id=?",
+                (machine_type, machine_name, report_id, user_id),
+            )
         con.commit()
         return cur.rowcount > 0
 
 def update_report_crop(report_id:int, user_id:int, crop:Optional[str]) -> bool:
     with connect() as con, closing(con.cursor()) as c:
-        cur = c.execute(
-            "UPDATE reports SET crop=? WHERE id=? AND user_id=?",
-            (crop, report_id, user_id)
-        )
+        if _is_admin_user_id(user_id):
+            cur = c.execute("UPDATE reports SET crop=? WHERE id=?", (crop, report_id))
+        else:
+            cur = c.execute("UPDATE reports SET crop=? WHERE id=? AND user_id=?", (crop, report_id, user_id))
         con.commit()
         return cur.rowcount > 0
 
 def update_report_trips(report_id:int, user_id:int, trips:Optional[int]) -> bool:
     with connect() as con, closing(con.cursor()) as c:
-        cur = c.execute(
-            "UPDATE reports SET trips=? WHERE id=? AND user_id=?",
-            (trips, report_id, user_id)
-        )
+        if _is_admin_user_id(user_id):
+            cur = c.execute("UPDATE reports SET trips=? WHERE id=?", (trips, report_id))
+        else:
+            cur = c.execute("UPDATE reports SET trips=? WHERE id=? AND user_id=?", (trips, report_id, user_id))
         con.commit()
         return cur.rowcount > 0
 
 def update_report_date(report_id:int, user_id:int, new_date:str) -> bool:
     with connect() as con, closing(con.cursor()) as c:
-        cur = c.execute(
-            "UPDATE reports SET work_date=? WHERE id=? AND user_id=?",
-            (new_date, report_id, user_id)
-        )
+        if _is_admin_user_id(user_id):
+            cur = c.execute("UPDATE reports SET work_date=? WHERE id=?", (new_date, report_id))
+        else:
+            cur = c.execute("UPDATE reports SET work_date=? WHERE id=? AND user_id=?", (new_date, report_id, user_id))
         con.commit()
         return cur.rowcount > 0
 
@@ -1494,6 +1526,55 @@ def fetch_stats_range_all(start_date:str, end_date:str):
         GROUP BY u.full_name, u.username, work_date, location, activity
         ORDER BY work_date DESC, u.full_name
         """, (start_date, end_date)).fetchall()
+        return rows
+
+def fetch_stats_range_all_with_uid(start_date: str, end_date: str):
+    """
+    Для админской статистики/редактирования: как fetch_stats_range_all, но с user_id.
+    """
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute("""
+        SELECT r.user_id, u.full_name, u.username, work_date, location, activity, SUM(hours) as h
+        FROM reports r
+        LEFT JOIN users u ON u.user_id=r.user_id
+        WHERE work_date BETWEEN ? AND ?
+        GROUP BY r.user_id, u.full_name, u.username, work_date, location, activity
+        ORDER BY work_date DESC, u.full_name
+        """, (start_date, end_date)).fetchall()
+        return rows
+
+def fetch_reports_for_user_range(user_id: int, start_date: str, end_date: str) -> List[tuple]:
+    """
+    Для админа: список конкретных записей (с id) за период, чтобы можно было изменить/удалить.
+    """
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute("""
+        SELECT id, work_date, activity, location, hours, created_at, machine_type, machine_name, crop, trips
+        FROM reports
+        WHERE user_id=? AND work_date BETWEEN ? AND ?
+        ORDER BY work_date DESC, created_at DESC
+        """, (user_id, start_date, end_date)).fetchall()
+        return rows
+
+def fetch_users_with_reports_range(start_date: str, end_date: str) -> List[tuple]:
+    """
+    Для админского редактирования: список пользователей, у которых есть записи за период.
+    returns: (user_id, full_name, username)
+    """
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute(
+            """
+            SELECT r.user_id,
+                   COALESCE(u.full_name, '') AS full_name,
+                   COALESCE(u.username,  '') AS username
+            FROM reports r
+            LEFT JOIN users u ON u.user_id=r.user_id
+            WHERE r.work_date BETWEEN ? AND ?
+            GROUP BY r.user_id
+            ORDER BY LOWER(COALESCE(u.full_name, '')) ASC, r.user_id ASC
+            """,
+            (start_date, end_date),
+        ).fetchall()
         return rows
 
 # -----------------------------
@@ -2911,7 +2992,8 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
     if role == "brigadier":
         kb.button(text="ОБ", callback_data="brig:report")
         kb.button(text="ОТД", callback_data="otd:start")
-        kb.button(text="Статистика", callback_data="brig:stats")
+        # Унифицированная статистика (один вход для всех ролей)
+        kb.button(text="Статистика", callback_data="menu:stats")
         kb.button(text="Настройки", callback_data="menu:name")
         kb.adjust(2, 2)
         return kb.as_markup()
@@ -4093,88 +4175,78 @@ async def show_settings_menu(bot: Bot, chat_id:int, user_id:int, header:str="З�
     await _edit_or_send(bot, chat_id, user_id, header, reply_markup=settings_menu_kb())
 
 async def show_stats_today(chat_id:int, user_id:int, admin:bool, via_command=False):
-    role = get_role_label(user_id)
-    admin = role == "admin"
-    if admin:
-        rows = fetch_stats_today_all()
-        if not rows:
-            text = "📊 Сегодня записей нет."
-        else:
-            parts = ["📊 <b>Сегодня (все)</b>:"]
-            cur_uid = None
-            subtotal = 0
-            for uid, full_name, uname, loc, act, h in rows:
-                if uid != cur_uid:
-                    if cur_uid is not None:
-                        parts.append(f"  — Итого сотрудник: <b>{subtotal}</b> ч\n")
-                    cur_uid = uid
-                    subtotal = 0
-                    who = full_name or (uname and "@"+uname) or str(uid)
-                    parts.append(f"\n👤 <b>{who}</b>")
-                parts.append(f"  • {loc} — {act}: <b>{h}</b> ч")
-                subtotal += h
-            if cur_uid is not None:
-                parts.append(f"  — Итого сотрудник: <b>{subtotal}</b> ч")
-            text = "\n".join(parts)
-    else:
-        today = date.today().isoformat()
-        rows = fetch_stats_range_for_user(user_id, today, today)
-        if not rows:
-            text = "📊 Сегодня у вас записей нет."
-        else:
-            parts = ["📊 <b>Сегодня</b>:"]
-            total = 0
-            for d, loc, act, h in rows:
-                parts.append(f"• {loc} — {act}: <b>{h}</b> ч")
-                total += h
-            parts.append(f"\nИтого: <b>{total}</b> ч")
-            text = "\n".join(parts)
-    await _edit_or_send(bot, chat_id, user_id, text, reply_markup=_ui_back_to_root_kb())
+    await show_stats_period(chat_id, user_id, "today")
 
 async def show_stats_week(chat_id:int, user_id:int, admin:bool, via_command=False):
-    role = get_role_label(user_id)
-    admin = role == "admin"
-    end = date.today()
-    start = end - timedelta(days=6)
-    if admin:
-        rows = fetch_stats_range_all(start.isoformat(), end.isoformat())
-        if not rows:
-            text = "📊 За 7 дней записей нет."
-        else:
-            parts = [f"📊 <b>Неделя</b> ({start.strftime('%d.%m')}–{end.strftime('%d.%m')}):"]
-            cur_user = None
-            subtotal = 0
-            for full_name, uname, d, loc, act, h in rows:
-                who = full_name or (uname and "@"+uname) or "—"
-                if who != cur_user:
-                    if cur_user is not None:
-                        parts.append(f"  — Итого сотрудник: <b>{subtotal}</b> ч\n")
-                    cur_user = who
-                    subtotal = 0
-                    parts.append(f"\n👤 <b>{who}</b>")
-                parts.append(f"  • {d} | {loc} — {act}: <b>{h}</b> ч")
-                subtotal += h
+    await show_stats_period(chat_id, user_id, "week")
+
+def _stats_period_label(period: str, start: date, end: date) -> str:
+    if period == "today":
+        return "сегодня"
+    if period == "week":
+        return f"неделю ({start.strftime('%d.%m')}–{end.strftime('%d.%m')})"
+    if period == "month":
+        return f"месяц ({start.strftime('%d.%m')}–{end.strftime('%d.%m')})"
+    return f"период ({start.strftime('%d.%m')}–{end.strftime('%d.%m')})"
+
+def _stats_period_menu_kb(role: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Сегодня", callback_data="stats:today")
+    kb.button(text="Неделя", callback_data="stats:week")
+    kb.button(text="Месяц", callback_data="stats:month")
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:root"))
+    kb.adjust(3)
+    return kb.as_markup()
+
+def _is_admin_user_id(user_id: int) -> bool:
+    # admin определяется через ADMIN_IDS / ADMIN_USERNAMES (get_role_label)
+    return get_role_label(user_id) == "admin"
+
+def _render_admin_otd(rows: list, period: str, start: date, end: date) -> str:
+    """
+    rows: list of tuples (full_name, username, work_date, location, activity, hours_sum)
+    """
+    period_str = _stats_period_label(period, start, end)
+    if not rows:
+        return f"📊 <b>ОТД</b> за {period_str}: нет записей."
+    parts = [f"📊 <b>ОТД</b> за {period_str}:"]
+    cur_user = None
+    subtotal = 0
+    for full_name, uname, d, loc, act, h in rows:
+        who = full_name or (uname and "@"+uname) or "—"
+        if who != cur_user:
             if cur_user is not None:
-                parts.append(f"  — Итого сотрудник: <b>{subtotal}</b> ч")
-            text = "\n".join(parts)
-    else:
-        rows = fetch_stats_range_for_user(user_id, start.isoformat(), end.isoformat())
-        if not rows:
-            text = "📊 За 7 дней у вас записей нет."
-        else:
-            parts = [f"📊 <b>Неделя</b> ({start.strftime('%d.%m')}–{end.strftime('%d.%m')}):"]
-            per_day = {}
-            total = 0
-            for d, loc, act, h in rows:
-                per_day.setdefault(d, []).append((loc, act, h))
-            for d in sorted(per_day.keys(), reverse=True):
-                parts.append(f"\n<b>{d}</b>")
-                for loc, act, h in per_day[d]:
-                    parts.append(f"• {loc} — {act}: <b>{h}</b> ч")
-                    total += h
-            parts.append(f"\nИтого: <b>{total}</b> ч")
-            text = "\n".join(parts)
-    await _edit_or_send(bot, chat_id, user_id, text, reply_markup=_ui_back_to_root_kb())
+                parts.append(f"  — Итого сотрудник: <b>{subtotal}</b> ч\n")
+            cur_user = who
+            subtotal = 0
+            parts.append(f"\n👤 <b>{who}</b>")
+        parts.append(f"  • {d} | {loc} — {act}: <b>{h}</b> ч")
+        subtotal += h
+    if cur_user is not None:
+        parts.append(f"  — Итого сотрудник: <b>{subtotal}</b> ч")
+    return "\n".join(parts)
+
+async def show_stats_period(chat_id: int, user_id: int, period: str) -> None:
+    role = get_role_label(user_id)
+    start, end = _stats_period_range(period)
+
+    if role == "brigadier":
+        ob_stats = fetch_brig_stats(user_id, start, end)
+        otd_rows = fetch_stats_range_for_user(user_id, start.isoformat(), end.isoformat())
+        text = _render_brig_stats_ob(ob_stats, period, start, end) + "\n\n" + _render_brig_stats_otd(otd_rows, period, start, end)
+        await _edit_or_send(bot, chat_id, user_id, text, reply_markup=_stats_result_kb(role=role, period=period))
+        return
+
+    if role == "admin":
+        rows = fetch_stats_range_all_with_uid(start.isoformat(), end.isoformat())
+        text = _render_admin_otd_stats(rows, period, start, end)
+        await _edit_or_send(bot, chat_id, user_id, text, reply_markup=_stats_result_kb(role=role, period=period))
+        return
+
+    # обычный пользователь / IT / TIM: показываем ОТД в одном формате (как у бригадиров)
+    otd_rows = fetch_stats_range_for_user(user_id, start.isoformat(), end.isoformat())
+    text = _render_brig_stats_otd(otd_rows, period, start, end)
+    await _edit_or_send(bot, chat_id, user_id, text, reply_markup=_stats_result_kb(role=role, period=period))
 
 # -------------- Меню --------------
 
@@ -4257,33 +4329,13 @@ async def cb_menu_work(c: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "menu:stats")
 async def cb_menu_stats(c: CallbackQuery):
     role = get_role_label(c.from_user.id)
-    if role in ("admin", "brigadier", "it", "tim"):
-        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                            "Выберите период статистики:",
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                [InlineKeyboardButton(text="Сегодня", callback_data="stats:today")],
-                                [InlineKeyboardButton(text="Неделя", callback_data="stats:week")],
-                                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu:root")],
-                            ]))
-    else:
-        rows = fetch_stats_month_for_user(c.from_user.id)
-        if not rows:
-            text = "📊 За этот месяц у вас нет записей."
-        else:
-            text_parts = ["📊 <b>Отчеты за месяц</b>:"]
-            for rid, d, act, loc, h, mtype, mname, crop, trips in rows:
-                mt = mtype or ""
-                mn = mname or ""
-                extra = f" ({mt} {mn})".strip()
-                crop_part = f" | {crop}" if crop else ""
-                trips_part = f" | рейсов: {trips}" if trips else ""
-                text_parts.append(f"• #{rid} {d} | {loc}{crop_part}{trips_part} — {act}{extra}: <b>{h}</b> ч")
-            text = "\n".join(text_parts)
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Изменить / удалить", callback_data="menu:edit")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="menu:root")],
-        ])
-        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, text, reply_markup=kb)
+    await _edit_or_send(
+        c.bot,
+        c.message.chat.id,
+        c.from_user.id,
+        "Выберите период статистики:",
+        reply_markup=_stats_period_menu_kb(role),
+    )
     await c.answer()
 
 # ---------------- ОТД (новый поток для работяг) ----------------
@@ -6213,16 +6265,12 @@ async def brig_stats_menu(c: CallbackQuery):
     if not (is_brigadier(c.from_user.id) or is_admin(c)):
         await c.answer("Нет прав", show_alert=True)
         return
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Сегодня", callback_data="brig:stats:today")
-    kb.button(text="Неделя", callback_data="brig:stats:week")
-    kb.button(text="🔙 Назад", callback_data="menu:root")
-    kb.adjust(2,1)
-    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, "Период статистики:", reply_markup=kb.as_markup())
+    # Совместимость со старой кнопкой бригадира — теперь ведём в общий экран статистики
+    await cb_menu_stats(c)
     await c.answer()
 
-def _render_brig_stats_ob(stats: dict, period: str) -> str:
-    period_str = "сегодня" if period == "today" else "неделю"
+def _render_brig_stats_ob(stats: dict, period: str, start: date, end: date) -> str:
+    period_str = _stats_period_label(period, start, end)
     lines = [f"📊 <b>ОБ</b> за {period_str}:"]
     by_crop = stats.get("by_crop") or {}
     if by_crop:
@@ -6245,7 +6293,12 @@ def _render_brig_stats_ob(stats: dict, period: str) -> str:
     return "\n".join(lines)
 
 def _render_brig_stats_otd(rows: list, period: str, start: date, end: date) -> str:
-    period_str = "сегодня" if period == "today" else f"неделю ({start.strftime('%d.%m')}–{end.strftime('%d.%m')})"
+    if period == "today":
+        period_str = "сегодня"
+    elif period == "month":
+        period_str = f"месяц ({start.strftime('%d.%m')}–{end.strftime('%d.%m')})"
+    else:
+        period_str = f"неделю ({start.strftime('%d.%m')}–{end.strftime('%d.%m')})"
     if not rows:
         return f"📊 <b>ОТД</b> за {period_str}: нет записей."
     parts = [f"📊 <b>ОТД</b> за {period_str}:"]
@@ -6261,21 +6314,79 @@ def _render_brig_stats_otd(rows: list, period: str, start: date, end: date) -> s
     parts.append(f"\nИтого: <b>{total}</b> ч")
     return "\n".join(parts)
 
+def _stats_period_range(period: str) -> tuple[date, date]:
+    today = date.today()
+    if period == "today":
+        return today, today
+    if period == "month":
+        start = today.replace(day=1)
+        # последний день месяца
+        if start.month == 12:
+            end = date(start.year + 1, 1, 1) - timedelta(days=1)
+        else:
+            end = date(start.year, start.month + 1, 1) - timedelta(days=1)
+        return start, end
+    # week (по умолчанию)
+    return today - timedelta(days=6), today
+
+def _render_admin_otd_stats(rows: list, period: str, start: date, end: date) -> str:
+    """
+    rows: (user_id, full_name, username, work_date, location, activity, h)
+    """
+    if period == "today":
+        period_str = "сегодня"
+    elif period == "month":
+        period_str = f"месяц ({start.strftime('%d.%m')}–{end.strftime('%d.%m')})"
+    else:
+        period_str = f"неделю ({start.strftime('%d.%m')}–{end.strftime('%d.%m')})"
+
+    if not rows:
+        return f"📊 <b>ОТД</b> за {period_str}: нет записей."
+
+    # group: user -> date -> list
+    by_user: dict[int, dict] = {}
+    for uid, full_name, uname, d, loc, act, h in rows:
+        u = by_user.setdefault(int(uid), {"name": (full_name or (uname and "@"+uname) or str(uid)), "days": {}})
+        u["days"].setdefault(d, []).append((loc, act, int(h or 0)))
+
+    lines = [f"📊 <b>ОТД</b> за {period_str}:"]
+    total_all = 0
+    # стабильная сортировка по имени
+    ordered_users = sorted(by_user.items(), key=lambda kv: (kv[1].get("name") or "").lower())
+    for _, u in ordered_users:
+        lines.append(f"\n👤 <b>{html.escape(str(u.get('name') or '—'))}</b>")
+        subtotal = 0
+        days = u.get("days") or {}
+        for d in sorted(days.keys(), reverse=True):
+            lines.append(f"\n<b>{d}</b>")
+            for loc, act, h in days[d]:
+                lines.append(f"• {loc} — {act}: <b>{h}</b> ч")
+                subtotal += h
+        lines.append(f"\n— Итого сотрудник: <b>{subtotal}</b> ч")
+        total_all += subtotal
+
+    lines.append(f"\nИтого всего: <b>{total_all}</b> ч")
+    return "\n".join(lines)
+
+def _stats_result_kb(*, role: str, period: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    # edit/delete
+    if role == "admin":
+        kb.row(InlineKeyboardButton(text="✏️ Изменить / удалить", callback_data=f"adm:stats:edit:{period}"))
+    else:
+        kb.row(InlineKeyboardButton(text="✏️ Изменить / удалить", callback_data="menu:edit"))
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:stats"))
+    kb.row(InlineKeyboardButton(text="🧰 В меню", callback_data="menu:root"))
+    return kb.as_markup()
+
 @router.callback_query(F.data.startswith("brig:stats:"))
 async def brig_stats_show(c: CallbackQuery):
     if not (is_brigadier(c.from_user.id) or is_admin(c)):
         await c.answer("Нет прав", show_alert=True)
         return
+    # Совместимость со старыми callback'ами бригадира
     period = c.data.split(":")[2]
-    today = date.today()
-    if period == "today":
-        start = today
-    else:
-        start = today - timedelta(days=6)
-    ob_stats = fetch_brig_stats(c.from_user.id, start, today)
-    otd_rows = fetch_stats_range_for_user(c.from_user.id, start.isoformat(), today.isoformat())
-    text = _render_brig_stats_ob(ob_stats, period) + "\n\n" + _render_brig_stats_otd(otd_rows, period, start, today)
-    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, text, reply_markup=_ui_back_to_root_kb())
+    await show_stats_period(c.message.chat.id, c.from_user.id, period)
     await c.answer()
 
 @router.callback_query(F.data == "tim:party")
@@ -6300,15 +6411,21 @@ async def it_star(c: CallbackQuery):
 
 @router.callback_query(F.data == "menu:edit")
 async def cb_menu_edit(c: CallbackQuery):
-    rows = user_recent_24h_reports(c.from_user.id)
+    await _send_user_edit_menu_by_id(c.bot, c.message.chat.id, c.from_user.id)
+    await c.answer()
+
+async def _send_user_edit_menu_by_id(bot: Bot, chat_id: int, user_id: int) -> None:
+    rows = user_recent_24h_reports(user_id)
     if not rows:
-        await _send_new_message(c.bot, c.message.chat.id, c.from_user.id,
-                            "📝 За последние 48 часов записей нет.",
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu:root")]
-                            ]))
-        await c.answer()
+        await _send_new_message(
+            bot,
+            chat_id,
+            user_id,
+            "📝 За последние 48 часов записей нет.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu:root")]]),
+        )
         return
+
     kb = InlineKeyboardBuilder()
     text = ["📝 <b>Ваши записи за последние 48 часов</b>:"]
     for rid, d, act, loc, h, created, mtype, mname, crop, trips in rows:
@@ -6323,11 +6440,17 @@ async def cb_menu_edit(c: CallbackQuery):
         text.append(f"• #{rid} {d} | {loc} — {act}: <b>{h}</b> ч{extra_str}")
         kb.row(
             InlineKeyboardButton(text=f"🖊 Изменить #{rid}", callback_data=f"edit:chg:{rid}:{d}"),
-            InlineKeyboardButton(text=f"🗑 Удалить #{rid}", callback_data=f"edit:del:{rid}")
+            InlineKeyboardButton(text=f"🗑 Удалить #{rid}", callback_data=f"edit:del:{rid}"),
         )
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:root"))
-    await _send_new_message(c.bot, c.message.chat.id, c.from_user.id, "\n".join(text), reply_markup=kb.as_markup())
-    await c.answer()
+    await _send_new_message(bot, chat_id, user_id, "\n".join(text), reply_markup=kb.as_markup())
+
+async def _edit_state_clear_preserve_return(state: FSMContext) -> None:
+    data = await state.get_data()
+    keep = {k: v for k, v in (data or {}).items() if k.startswith("edit_return_")}
+    await state.clear()
+    if keep:
+        await state.update_data(**keep)
 
 @router.callback_query(F.data == "menu:admin")
 async def cb_menu_admin(c: CallbackQuery):
@@ -7245,6 +7368,190 @@ async def cb_stats_today(c: CallbackQuery):
 @router.callback_query(F.data == "stats:week")
 async def cb_stats_week(c: CallbackQuery):
     await show_stats_week(c.message.chat.id, c.from_user.id, is_admin(c))
+    await c.answer()
+
+@router.callback_query(F.data == "stats:month")
+async def cb_stats_month(c: CallbackQuery):
+    # В меню периода кнопка "Месяц" должна работать так же, как "Сегодня/Неделя"
+    await show_stats_period(c.message.chat.id, c.from_user.id, "month")
+    await c.answer()
+
+def _format_user_label(user_id: int, full_name: str = "", username: str = "") -> str:
+    name = (full_name or "").strip()
+    uname = (username or "").strip()
+    if uname and not uname.startswith("@"):
+        uname = "@" + uname
+    if name and uname:
+        return f"{name} {uname}"
+    if name:
+        return name
+    if uname:
+        return uname
+    return str(user_id)
+
+async def _admin_stats_show_user_list(bot: Bot, chat_id: int, actor_id: int, *, period: str, page: int, state: FSMContext) -> None:
+    start, end = _stats_period_range(period)
+    users = fetch_users_with_reports_range(start.isoformat(), end.isoformat())
+    period_str = _stats_period_label(period, start, end)
+
+    page_size = 10
+    total = len(users)
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, pages - 1))
+    chunk = users[page * page_size : (page + 1) * page_size]
+
+    kb = InlineKeyboardBuilder()
+    if not chunk:
+        kb.row(InlineKeyboardButton(text="— нет записей —", callback_data="menu:stats"))
+    else:
+        for uid, full_name, uname in chunk:
+            label = _format_user_label(int(uid), full_name, uname)[:64]
+            kb.row(InlineKeyboardButton(text=label, callback_data=f"adm:stats:edit:{period}:u:{int(uid)}:rp:0:lp:{page}"))
+
+    nav = InlineKeyboardBuilder()
+    if pages > 1:
+        if page > 0:
+            nav.button(text="⬅️", callback_data=f"adm:stats:edit:{period}:p:{page-1}")
+        nav.button(text=f"{page+1}/{pages}", callback_data="menu:stats")
+        if page < pages - 1:
+            nav.button(text="➡️", callback_data=f"adm:stats:edit:{period}:p:{page+1}")
+        nav.adjust(3)
+        kb.row(*nav.buttons)
+
+    kb.row(InlineKeyboardButton(text="📊 К статистике", callback_data="menu:stats"))
+    kb.row(InlineKeyboardButton(text="🧰 В меню", callback_data="menu:root"))
+
+    # сохраняем контекст возврата (для edit flow)
+    await state.update_data(
+        edit_return_mode="adm_stats_user_list",
+        edit_return_period=period,
+        edit_return_list_page=page,
+    )
+    await _edit_or_send(
+        bot,
+        chat_id,
+        actor_id,
+        f"✏️ <b>Админ: изменение/удаление</b>\nВыберите сотрудника за {period_str}:",
+        reply_markup=kb.as_markup(),
+    )
+
+async def _admin_stats_show_user_reports(
+    bot: Bot,
+    chat_id: int,
+    actor_id: int,
+    *,
+    period: str,
+    target_user_id: int,
+    rpage: int,
+    lpage: int,
+    state: FSMContext,
+) -> None:
+    start, end = _stats_period_range(period)
+    period_str = _stats_period_label(period, start, end)
+    rows = fetch_reports_for_user_range(target_user_id, start.isoformat(), end.isoformat())
+
+    page_size = 8
+    total = len(rows)
+    pages = max(1, (total + page_size - 1) // page_size)
+    rpage = max(0, min(int(rpage), pages - 1))
+    chunk = rows[rpage * page_size : (rpage + 1) * page_size]
+
+    # Заголовок
+    u = get_user(target_user_id) or {}
+    title_user = _format_user_label(target_user_id, u.get("full_name", ""), u.get("username", ""))
+    text = [f"📝 <b>{html.escape(title_user)}</b>\nЗаписи за {period_str}:"]
+    kb = InlineKeyboardBuilder()
+
+    if not chunk:
+        text.append("\n— нет записей —")
+    else:
+        for rid, d, act, loc, h, created, mtype, mname, crop, trips in chunk:
+            extra = []
+            if crop:
+                extra.append(f"культура: {crop}")
+            if mtype:
+                extra.append(mtype if not mname else f"{mtype} {mname}")
+            if trips:
+                extra.append(f"рейсов: {trips}")
+            extra_str = f" ({'; '.join(extra)})" if extra else ""
+            text.append(f"\n• #{rid} {d} | {loc} — {act}: <b>{h}</b> ч{extra_str}")
+            kb.row(
+                InlineKeyboardButton(text=f"🖊 Изменить #{rid}", callback_data=f"edit:chg:{rid}:{d}"),
+                InlineKeyboardButton(text=f"🗑 Удалить #{rid}", callback_data=f"edit:del:{rid}"),
+            )
+
+    # Навигация по страницам
+    if pages > 1:
+        nav = InlineKeyboardBuilder()
+        if rpage > 0:
+            nav.button(text="⬅️", callback_data=f"adm:stats:edit:{period}:u:{target_user_id}:rp:{rpage-1}:lp:{lpage}")
+        nav.button(text=f"{rpage+1}/{pages}", callback_data="menu:stats")
+        if rpage < pages - 1:
+            nav.button(text="➡️", callback_data=f"adm:stats:edit:{period}:u:{target_user_id}:rp:{rpage+1}:lp:{lpage}")
+        nav.adjust(3)
+        kb.row(*nav.buttons)
+
+    kb.row(InlineKeyboardButton(text="🔙 К списку сотрудников", callback_data=f"adm:stats:edit:{period}:p:{lpage}"))
+    kb.row(InlineKeyboardButton(text="🧰 В меню", callback_data="menu:root"))
+
+    # контекст возврата из EditFSM
+    await state.update_data(
+        edit_return_mode="adm_stats_user",
+        edit_return_period=period,
+        edit_return_uid=int(target_user_id),
+        edit_return_rpage=int(rpage),
+        edit_return_lpage=int(lpage),
+        edit_return_cb=f"adm:stats:edit:{period}:u:{int(target_user_id)}:rp:{int(rpage)}:lp:{int(lpage)}",
+    )
+    await _edit_or_send(bot, chat_id, actor_id, "\n".join(text), reply_markup=kb.as_markup())
+
+@router.callback_query(F.data.startswith("adm:stats:edit:"))
+async def adm_stats_edit_router(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    parts = c.data.split(":")
+    # adm:stats:edit:{period}[:p:{page}]  OR  adm:stats:edit:{period}:u:{uid}:rp:{rpage}:lp:{lpage}
+    period = parts[3] if len(parts) > 3 else "week"
+    if len(parts) == 4:
+        await _admin_stats_show_user_list(c.bot, c.message.chat.id, c.from_user.id, period=period, page=0, state=state)
+        await c.answer()
+        return
+    # page list
+    if len(parts) >= 6 and parts[4] == "p":
+        page = int(parts[5])
+        await _admin_stats_show_user_list(c.bot, c.message.chat.id, c.from_user.id, period=period, page=page, state=state)
+        await c.answer()
+        return
+    # user reports
+    if len(parts) >= 10 and parts[4] == "u":
+        uid = int(parts[5])
+        # parts[6] == rp, parts[8] == lp
+        rpage = int(parts[7]) if len(parts) > 7 else 0
+        lpage = int(parts[9]) if len(parts) > 9 else 0
+        await _admin_stats_show_user_reports(
+            c.bot,
+            c.message.chat.id,
+            c.from_user.id,
+            period=period,
+            target_user_id=uid,
+            rpage=rpage,
+            lpage=lpage,
+            state=state,
+        )
+        await c.answer()
+        return
+    await c.answer("Некорректная команда", show_alert=True)
+
+# Совместимость со старым callback из меню (если где-то осталось)
+@router.callback_query(F.data.startswith("stats:adm:edit:"))
+async def adm_stats_edit_compat(c: CallbackQuery, state: FSMContext):
+    # stats:adm:edit:{period}
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    period = (c.data.split(":")[3] if len(c.data.split(":")) > 3 else "week")
+    await _admin_stats_show_user_list(c.bot, c.message.chat.id, c.from_user.id, period=period, page=0, state=state)
     await c.answer()
 
 # -------------- WORK flow и Назад --------------
