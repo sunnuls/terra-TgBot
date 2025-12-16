@@ -6379,15 +6379,19 @@ def _render_admin_otd_stats(rows: list, period: str, start: date, end: date) -> 
     return "\n".join(lines)
 
 def _stats_result_kb(*, role: str, period: str) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    # edit/delete
-    if role == "admin":
-        kb.row(InlineKeyboardButton(text="✏️ Изменить / удалить", callback_data=f"adm:stats:edit:{period}"))
-    else:
-        kb.row(InlineKeyboardButton(text="✏️ Изменить / удалить", callback_data="menu:edit"))
-    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:stats"))
-    kb.row(InlineKeyboardButton(text="🧰 В меню", callback_data="menu:root"))
-    return kb.as_markup()
+    # Явная разметка клавиатуры (без билдера), чтобы гарантированно рисовались все строки.
+    first_row = (
+        InlineKeyboardButton(text="✏️ Изменить / удалить", callback_data=f"adm:stats:edit:{period}")
+        if role == "admin"
+        else InlineKeyboardButton(text="✏️ Изменить / удалить", callback_data="menu:edit")
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [first_row],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="menu:stats")],
+            [InlineKeyboardButton(text="🧰 В меню", callback_data="menu:root")],
+        ]
+    )
 
 @router.callback_query(F.data.startswith("brig:stats:"))
 async def brig_stats_show(c: CallbackQuery):
