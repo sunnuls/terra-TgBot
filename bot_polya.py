@@ -4035,7 +4035,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
     await show_main_menu(message.chat.id, message.from_user.id, u, "Готово. Выберите пункт меню.")
 
-@router.message(F.text)
+@router.message(StateFilter(None), F.text)
 async def auto_register_on_any_text(message: Message, state: FSMContext):
     """
     UX: новый пользователь может начать регистрацию "первым любым сообщением", а не только /start.
@@ -4043,9 +4043,7 @@ async def auto_register_on_any_text(message: Message, state: FSMContext):
     """
     if not message.from_user or message.from_user.is_bot:
         return
-    # не мешаем активным сценариям
-    if await state.get_state():
-        return
+    # StateFilter(None) гарантирует, что активного состояния нет.
     # в read-only чате не реагируем
     if READONLY_CHAT_ID is not None and message.chat.id == READONLY_CHAT_ID:
         return
