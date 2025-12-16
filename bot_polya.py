@@ -2036,43 +2036,43 @@ def export_reports_to_sheets():
             # Удаляем снизу вверх, чтобы индексы не "ехали" при множественных удалениях
             items.sort(key=lambda x: x[1], reverse=True)
             for report_id, row_number in items:
-            try:
-                # Удаляем строку из таблицы с повторными попытками
-                def delete_row():
-                    return sheets_service.spreadsheets().batchUpdate(
-                        spreadsheetId=spreadsheet_id,
-                        body={
-                            "requests": [{
-                                "deleteDimension": {
-                                    "range": {
-                                        "sheetId": 0,
-                                        "dimension": "ROWS",
-                                        "startIndex": row_number - 1,
-                                        "endIndex": row_number
+                try:
+                    # Удаляем строку из таблицы с повторными попытками
+                    def delete_row():
+                        return sheets_service.spreadsheets().batchUpdate(
+                            spreadsheetId=spreadsheet_id,
+                            body={
+                                "requests": [{
+                                    "deleteDimension": {
+                                        "range": {
+                                            "sheetId": 0,
+                                            "dimension": "ROWS",
+                                            "startIndex": row_number - 1,
+                                            "endIndex": row_number
+                                        }
                                     }
-                                }
-                            }]
-                        }
-                    ).execute()
-                
-                retry_google_api_call(delete_row)
-                
-                # Удаляем запись из БД
-                with connect() as con, closing(con.cursor()) as c:
-                    c.execute("DELETE FROM google_exports WHERE report_id=?", (report_id,))
-                    # Сдвигаем номера строк для оставшихся записей в этом spreadsheet
-                    c.execute(
-                        "UPDATE google_exports SET row_number = row_number - 1 "
-                        "WHERE spreadsheet_id=? AND row_number>? ",
-                        (spreadsheet_id, row_number),
-                    )
-                    con.commit()
-                
-                total_deleted += 1
-                logging.info(f"Deleted report {report_id} from sheet")
-                
-            except Exception as e:
-                logging.error(f"Error deleting report {report_id}: {e}")
+                                }]
+                            }
+                        ).execute()
+                    
+                    retry_google_api_call(delete_row)
+                    
+                    # Удаляем запись из БД
+                    with connect() as con, closing(con.cursor()) as c:
+                        c.execute("DELETE FROM google_exports WHERE report_id=?", (report_id,))
+                        # Сдвигаем номера строк для оставшихся записей в этом spreadsheet
+                        c.execute(
+                            "UPDATE google_exports SET row_number = row_number - 1 "
+                            "WHERE spreadsheet_id=? AND row_number>? ",
+                            (spreadsheet_id, row_number),
+                        )
+                        con.commit()
+                    
+                    total_deleted += 1
+                    logging.info(f"Deleted report {report_id} from sheet")
+                    
+                except Exception as e:
+                    logging.error(f"Error deleting report {report_id}: {e}")
         
         # Экспортируем каждую группу по месяцам
         for (year, month), reports in reports_by_month.items():
