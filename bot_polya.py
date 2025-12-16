@@ -3919,8 +3919,17 @@ async def _prompt_phone_registration(message_or_cb, state: FSMContext, *, back_c
         chat_id = message_or_cb.chat.id
         user_id = message_or_cb.from_user.id
 
+    try:
+        logging.info("[phone] prompt chat_id=%s type=%s user_id=%s", chat_id, getattr(chat, "type", None), user_id)
+    except Exception:
+        pass
+
     # Лучше делать регистрацию телефона в личке (и подтверждение контактом тоже)
     if getattr(chat, "type", None) != "private":
+        try:
+            logging.info("[phone] prompt skipped: not private (type=%s)", getattr(chat, "type", None))
+        except Exception:
+            pass
         await _edit_or_send(
             bot,
             chat_id,
@@ -4351,6 +4360,10 @@ async def msg_persistent_menu(message: Message, state: FSMContext):
 @router.message(NameFSM.waiting_name)
 async def capture_full_name(message: Message, state: FSMContext):
     text = (message.text or "").strip()
+    try:
+        logging.info("[name] got full_name='%s' chat_id=%s user_id=%s", text, message.chat.id, message.from_user.id)
+    except Exception:
+        pass
     data = await state.get_data()
     from_settings = data.get("name_change_from_settings")
     back_cb = "menu:name" if from_settings else "menu:root"
@@ -4377,6 +4390,10 @@ async def capture_full_name(message: Message, state: FSMContext):
     
     # После ФИО — просим телефон (нужен для Google Sheets UserID)
     if not _has_phone(u):
+        try:
+            logging.info("[name] no phone yet -> prompt phone user_id=%s", message.from_user.id)
+        except Exception:
+            pass
         await _prompt_phone_registration(message, state, back_cb=back_cb)
         return
 
