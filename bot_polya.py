@@ -4652,6 +4652,15 @@ async def otd_back_field(c: CallbackQuery, state: FSMContext):
         await state.set_state(OtdFSM.pick_trips)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                             "Введите количество рейсов (число):")
+    elif back == "hand":
+        await state.set_state(OtdFSM.pick_activity)
+        await _edit_or_send(
+            c.bot,
+            c.message.chat.id,
+            c.from_user.id,
+            "Выберите вид работы:",
+            reply_markup=otd_hand_work_kb(),
+        )
     else:
         # по умолчанию возвращаемся к выбору работы (трактор)
         await state.set_state(OtdFSM.pick_activity)
@@ -4951,10 +4960,17 @@ async def otd_pick_hand(c: CallbackQuery, state: FSMContext):
     work["act_grp"] = GROUP_HAND
     work["machine_type"] = "Ручная"
     work["machine_name"] = None
+    # Для ручных работ тоже спрашиваем локацию (как для трактора):
+    work["field_back"] = "hand"
     await state.update_data(otd=work)
-    await state.set_state(OtdFSM.pick_crop)
-    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Культура:", reply_markup=otd_crops_kb(kamaz=(work.get("machine_mode") == "single")))
+    await state.set_state(OtdFSM.pick_location)
+    await _edit_or_send(
+        c.bot,
+        c.message.chat.id,
+        c.from_user.id,
+        "Выберите локацию:",
+        reply_markup=otd_fields_kb("otd:field"),
+    )
     await c.answer()
 
 @router.callback_query(F.data == "otd:back:actcustom")
@@ -4997,9 +5013,17 @@ async def otd_pick_activity_custom(message: Message, state: FSMContext):
         await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
                             "Поле:", reply_markup=otd_fields_kb("otd:field"))
     else:
-        await state.set_state(OtdFSM.pick_crop)
-        await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
-                            "Культура:", reply_markup=otd_crops_kb(kamaz=(work.get("machine_mode") == "single")))
+        # Ручная — тоже просим локацию
+        work["field_back"] = "hand"
+        await state.update_data(otd=work)
+        await state.set_state(OtdFSM.pick_location)
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "Выберите локацию:",
+            reply_markup=otd_fields_kb("otd:field"),
+        )
 
 @router.callback_query(F.data.startswith("otd:crop:"))
 async def otd_pick_crop(c: CallbackQuery, state: FSMContext):
@@ -5029,9 +5053,21 @@ async def otd_pick_crop(c: CallbackQuery, state: FSMContext):
     elif work.get("machine_type") == "Трактор":
         await _otd_to_confirm(c.bot, c.message.chat.id, c.from_user.id, state)
     elif work.get("act_grp") == GROUP_HAND:
-        work.setdefault("location", "—")
-        work.setdefault("location_grp", "—")
-        await state.update_data(otd=work)
+        # Для ручной теперь ожидаем, что локация уже выбрана.
+        # На всякий случай (если пользователь попал сюда старым путём) — доспрашиваем локацию.
+        if not (work.get("location") or "").strip() or (work.get("location") == "—"):
+            work["field_back"] = "hand"
+            await state.update_data(otd=work)
+            await state.set_state(OtdFSM.pick_location)
+            await _edit_or_send(
+                c.bot,
+                c.message.chat.id,
+                c.from_user.id,
+                "Выберите локацию:",
+                reply_markup=otd_fields_kb("otd:field"),
+            )
+            await c.answer()
+            return
         await _otd_to_confirm(c.bot, c.message.chat.id, c.from_user.id, state)
     else:
         await otd_back_type(c, state)
