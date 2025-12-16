@@ -2674,15 +2674,45 @@ async def _ui_edit_content(
                 if "message to edit not found" in str(e).lower():
                     content_id = None
                     _ui_save_state(target_chat_id, user_id, content=None)
+                else:
+                    logging.error(
+                        "[ui] edit_message_text TelegramBadRequest chat_id=%s msg_id=%s err=%s",
+                        target_chat_id, content_id, str(e),
+                    )
+            except TelegramForbiddenError as e:
+                logging.error(
+                    "[ui] edit_message_text Forbidden chat_id=%s msg_id=%s err=%s",
+                    target_chat_id, content_id, str(e),
+                )
+                raise
+            except Exception as e:
+                logging.exception(
+                    "[ui] edit_message_text failed chat_id=%s msg_id=%s",
+                    target_chat_id, content_id,
+                )
+                raise
 
         # 2) если нет/не редактируется — отправим новый контент ниже меню
-        msg = await bot.send_message(
-            target_chat_id,
-            text,
-            reply_markup=reply_markup,
-            disable_web_page_preview=True,
-            **extra,
-        )
+        try:
+            msg = await bot.send_message(
+                target_chat_id,
+                text,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+                **extra,
+            )
+        except TelegramForbiddenError as e:
+            logging.error(
+                "[ui] send_message Forbidden chat_id=%s user_id=%s err=%s",
+                target_chat_id, user_id, str(e),
+            )
+            raise
+        except Exception:
+            logging.exception(
+                "[ui] send_message failed chat_id=%s user_id=%s",
+                target_chat_id, user_id,
+            )
+            raise
 
         # попробуем подчистить "старый контент", если он был (чтобы стремиться к 2 сообщениям)
         old_content = state.get("content")
