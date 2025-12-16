@@ -2574,6 +2574,16 @@ async def _ui_edit_content(
                 return int(content_id)
             except TelegramBadRequest as e:
                 if "message is not modified" in str(e).lower():
+                    # Telegram may report "not modified" even when we want to refresh the keyboard.
+                    # Best-effort: try to update reply_markup explicitly.
+                    try:
+                        await bot.edit_message_reply_markup(
+                            chat_id=target_chat_id,
+                            message_id=content_id,
+                            reply_markup=reply_markup,
+                        )
+                    except Exception:
+                        pass
                     return int(content_id)
                 if "message to edit not found" in str(e).lower():
                     content_id = None
