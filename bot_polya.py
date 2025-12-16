@@ -3928,9 +3928,13 @@ async def _require_profile(message_or_cb, state: FSMContext, *, back_cb: str = "
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    # Проверяем разрешенную тему для команд
+    # Проверяем разрешенную тему для команд.
+    # Важно: после /purge_release у пользователей нет профиля, и им нужно иметь возможность
+    # запустить регистрацию даже если сообщение пришло из "не той" темы.
     if not _is_allowed_topic(message):
-        return
+        u0 = get_user(message.from_user.id) if message.from_user else None
+        if u0 and (u0.get("full_name") or "").strip() and _has_phone(u0):
+            return
     init_db()
     u = get_user(message.from_user.id)
     if not u:
@@ -3948,6 +3952,54 @@ async def cmd_start(message: Message, state: FSMContext):
         return
 
     # Телефон нужен для Google Sheets UserID (совместимость с WhatsApp)
+    if not _has_phone(u):
+        await _prompt_phone_registration(message, state, back_cb="menu:root")
+        return
+
+    await show_main_menu(message.chat.id, message.from_user.id, u, "Готово. Выберите пункт меню.")
+
+@router.message(F.text)
+async def auto_register_on_any_text(message: Message, state: FSMContext):
+    """
+    UX: новый пользователь может начать регистрацию "первым любым сообщением", а не только /start.
+    Не вмешиваемся в активные FSM-сценарии и не реагируем в READONLY чате.
+    """
+    if not message.from_user or message.from_user.is_bot:
+        return
+    # не мешаем активным сценариям
+    if await state.get_state():
+        return
+    # в read-only чате не реагируем
+    if READONLY_CHAT_ID is not None and message.chat.id == READONLY_CHAT_ID:
+        return
+    text = (message.text or "").strip()
+    if not text or text.startswith("/"):
+        return
+    # если пользователь уже зарегистрирован — ничего не делаем
+    u = get_user(message.from_user.id) or {}
+    if (u.get("full_name") or "").strip() and _has_phone(u):
+        return
+
+    init_db()
+    # создадим/обновим пользователя, чтобы был username
+    if not u:
+        upsert_user(message.from_user.id, None, TZ, message.from_user.username or "")
+        u = get_user(message.from_user.id) or {}
+
+    # стараемся удалить "первое сообщение", чтобы не засорять чат
+    await _ui_try_delete_user_message(message)
+
+    # запускаем регистрацию по тем же правилам, что и /start
+    if not (u.get("full_name") or "").strip():
+        await state.set_state(NameFSM.waiting_name)
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            "👋 Для начала введите <b>Фамилию Имя</b> (например: <b>Иванов Иван</b>).",
+        )
+        return
+
     if not _has_phone(u):
         await _prompt_phone_registration(message, state, back_cb="menu:root")
         return
