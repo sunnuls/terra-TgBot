@@ -3942,11 +3942,29 @@ async def _require_profile(message_or_cb, state: FSMContext, *, back_cb: str = "
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    try:
+        logging.info(
+            "[start] chat_id=%s type=%s thread_id=%s user_id=%s username=%s",
+            getattr(message.chat, "id", None),
+            getattr(message.chat, "type", None),
+            getattr(message, "message_thread_id", None),
+            getattr(message.from_user, "id", None),
+            getattr(message.from_user, "username", None),
+        )
+    except Exception:
+        pass
     # Проверяем разрешенную тему для команд.
     # Важно: после /purge_release у пользователей нет профиля, и им нужно иметь возможность
     # запустить регистрацию даже если сообщение пришло из "не той" темы.
     if not _is_allowed_topic(message):
         u0 = get_user(message.from_user.id) if message.from_user else None
+        try:
+            logging.info(
+                "[start] not_allowed_topic=True registered=%s",
+                bool(u0 and (u0.get("full_name") or "").strip() and _has_phone(u0)),
+            )
+        except Exception:
+            pass
         if u0 and (u0.get("full_name") or "").strip() and _has_phone(u0):
             return
     init_db()
@@ -3989,6 +4007,18 @@ async def auto_register_on_any_text(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     if not text or text.startswith("/"):
         return
+    try:
+        logging.info(
+            "[auto-reg] chat_id=%s type=%s thread_id=%s user_id=%s username=%s text=%s",
+            getattr(message.chat, "id", None),
+            getattr(message.chat, "type", None),
+            getattr(message, "message_thread_id", None),
+            getattr(message.from_user, "id", None),
+            getattr(message.from_user, "username", None),
+            (text[:80] + "…") if len(text) > 80 else text,
+        )
+    except Exception:
+        pass
     # если пользователь уже зарегистрирован — ничего не делаем
     u = get_user(message.from_user.id) or {}
     if (u.get("full_name") or "").strip() and _has_phone(u):
