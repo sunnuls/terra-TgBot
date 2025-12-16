@@ -1634,6 +1634,51 @@ def retry_google_api_call(func, max_retries=3, delay=1):
                 raise
     return None
 
+def _drive_escape_q(s: str) -> str:
+    # Escape single quotes for Drive query strings
+    return (s or "").replace("'", "\\'")
+
+def _drive_find_spreadsheet_in_folder(drive, *, folder_id: str, name: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Ищет существующую Google Sheet по имени в указанной папке Drive.
+    Возвращает (spreadsheet_id, webViewLink) или (None, None).
+    """
+    if not folder_id or not name:
+        return None, None
+
+    q = (
+        "mimeType='application/vnd.google-apps.spreadsheet' "
+        f"and name='{_drive_escape_q(name)}' "
+        f"and '{folder_id}' in parents "
+        "and trashed=false"
+    )
+
+    def _list():
+        return drive.files().list(
+            q=q,
+            fields="files(id, webViewLink, createdTime)",
+            pageSize=20,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+
+    res = retry_google_api_call(_list)
+    files = (res or {}).get("files") or []
+    if not files:
+        return None, None
+
+    # If duplicates exist, prefer the newest.
+    files_sorted = sorted(files, key=lambda f: (f.get("createdTime") or ""), reverse=True)
+    f0 = files_sorted[0] or {}
+    sid = f0.get("id")
+    link = f0.get("webViewLink")
+    if sid and not link:
+        def _get():
+            return drive.files().get(fileId=sid, fields="webViewLink", supportsAllDrives=True).execute()
+        got = retry_google_api_call(_get) or {}
+        link = got.get("webViewLink")
+    return sid, link
+
 def get_or_create_monthly_sheet(year: int, month: int):
     """Получить или создать таблицу для месяца"""
     with connect() as con, closing(con.cursor()) as c:
@@ -1659,6 +1704,20 @@ def get_or_create_monthly_sheet(year: int, month: int):
             month_names = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
                           "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
             sheet_name = f"{EXPORT_PREFIX} - {month_names[month]} {year}"
+
+            # Если таблица уже создана (например, WhatsApp-ботом), переиспользуем её.
+            if DRIVE_FOLDER_ID:
+                existing_id, existing_url = _drive_find_spreadsheet_in_folder(
+                    drive, folder_id=DRIVE_FOLDER_ID, name=sheet_name
+                )
+                if existing_id and existing_url:
+                    c.execute(
+                        "INSERT INTO monthly_sheets(year, month, spreadsheet_id, sheet_url, created_at) VALUES(?,?,?,?,?)",
+                        (year, month, existing_id, existing_url, datetime.now().isoformat()),
+                    )
+                    con.commit()
+                    logging.info(f"Reused existing sheet for {year}-{month:02d}: {existing_url}")
+                    return existing_id, existing_url
             
             # Создаем таблицу с повторными попытками
             file_metadata = {
@@ -1762,6 +1821,19 @@ def get_or_create_brig_monthly_sheet(year: int, month: int):
             month_names = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
                            "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
             sheet_name = f"{BRIG_EXPORT_PREFIX} - {month_names[month]} {year}"
+
+            # Если таблица уже создана (например, WhatsApp-ботом), переиспользуем её.
+            existing_id, existing_url = _drive_find_spreadsheet_in_folder(
+                drive, folder_id=BRIGADIER_FOLDER_ID, name=sheet_name
+            )
+            if existing_id and existing_url:
+                c.execute(
+                    "INSERT INTO brig_monthly_sheets(year, month, spreadsheet_id, sheet_url, created_at) VALUES(?,?,?,?,?)",
+                    (year, month, existing_id, existing_url, datetime.now().isoformat()),
+                )
+                con.commit()
+                logging.info(f"Reused existing brig sheet for {year}-{month:02d}: {existing_url}")
+                return existing_id, existing_url
 
             file_metadata = {
                 "name": sheet_name,
