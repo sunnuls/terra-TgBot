@@ -2648,6 +2648,12 @@ async def _ui_edit_content(
         # re-read inside lock to avoid races (double taps / parallel callback processing)
         state = _ui_get_state(target_chat_id, user_id)
         content_id = state.get("content")
+
+        # В личке (chat_id == user_id) лучше отправлять новое сообщение,
+        # иначе редактирование "старого" контента выглядит как будто бот молчит.
+        # (особенно после purge/reset, когда UI-история могла уехать вверх)
+        if int(target_chat_id) == int(user_id):
+            content_id = None
         if content_id:
             try:
                 await bot.edit_message_text(
