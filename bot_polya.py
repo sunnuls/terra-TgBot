@@ -1674,7 +1674,11 @@ def get_google_credentials():
             else:
                 creds = flow.run_local_server(port=0, access_type="offline", prompt="consent")
         except Exception:
-            creds = flow.run_console(access_type="offline", prompt="consent")
+            if hasattr(flow, 'run_console'):
+                creds = flow.run_console(access_type="offline", prompt="consent")
+            else:
+                logging.error("Interactive OAuth failed and run_console is not available. Please use Service Account.")
+                return None
 
         try:
             TOKEN_JSON_PATH.write_text(creds.to_json(), encoding="utf-8")
