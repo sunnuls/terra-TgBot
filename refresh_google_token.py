@@ -42,7 +42,7 @@ def refresh_token():
         TOKEN_JSON_PATH.unlink()
     
     print("\n🔐 Начинаем авторизацию...")
-    print("   Сейчас откроется браузер для входа в Google аккаунт.")
+    print("   Сейчас будет выдана ссылка для входа в Google аккаунт.")
     print("   Разрешите доступ к Google Drive и Google Sheets.")
     print()
     
@@ -53,9 +53,21 @@ def refresh_token():
             SCOPES
         )
         
-        # Запускаем локальный сервер для получения токена
-        print("⏳ Открываю браузер...")
-        creds = flow.run_local_server(port=0)
+        # На headless-серверах (без DISPLAY) браузер открыть нельзя.
+        # В таком режиме запускаем локальный callback-сервер без попытки открыть браузер.
+        is_headless = (os.name != "nt") and (not os.getenv("DISPLAY"))
+        try:
+            if is_headless:
+                creds = flow.run_local_server(
+                    port=int(os.getenv("OAUTH_LOCAL_PORT", "8080")),
+                    open_browser=False,
+                    access_type="offline",
+                    prompt="consent",
+                )
+            else:
+                creds = flow.run_local_server(port=0, access_type="offline", prompt="consent")
+        except Exception:
+            creds = flow.run_console(access_type="offline", prompt="consent")
         
         # Сохраняем токен
         TOKEN_JSON_PATH.write_text(creds.to_json(), encoding="utf-8")

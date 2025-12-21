@@ -3,6 +3,7 @@
 
 import asyncio
 import html
+import json
 import os
 import sqlite3
 from contextlib import closing
@@ -39,6 +40,8 @@ from dotenv import load_dotenv
 
 # Google Sheets API
 from google.oauth2.credentials import Credentials
+from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -198,6 +201,10 @@ GOOGLE_SCOPES = [
 ]
 OAUTH_CLIENT_JSON = os.getenv("OAUTH_CLIENT_JSON", "oauth_client.json")
 TOKEN_JSON_PATH = Path(os.getenv("TOKEN_JSON_PATH", "token.json"))
+GOOGLE_AUTH_MODE = (os.getenv("GOOGLE_AUTH_MODE", "") or "").strip().lower()
+GOOGLE_SERVICE_ACCOUNT_FILE = (os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "") or "").strip()
+GOOGLE_SERVICE_ACCOUNT_JSON = (os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "") or "").strip()
+ALLOW_OAUTH_INTERACTIVE = (os.getenv("ALLOW_OAUTH_INTERACTIVE", "false") or "false").strip().lower() == "true"
 DRIVE_FOLDER_ID = _extract_drive_folder_id(os.getenv("DRIVE_FOLDER_ID", ""))
 EXPORT_PREFIX = os.getenv("EXPORT_PREFIX", "ОТД")
 
@@ -1597,25 +1604,98 @@ def fetch_users_with_reports_range(start_date: str, end_date: str) -> List[tuple
 
 def get_google_credentials():
     """Получить учетные данные Google OAuth"""
+    use_service_account = bool(GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON)
+    if GOOGLE_AUTH_MODE in {"service", "service_account", "sa"}:
+        use_service_account = True
+    if GOOGLE_AUTH_MODE in {"oauth", "user"}:
+        use_service_account = False
+
+    if use_service_account:
+        try:
+            if GOOGLE_SERVICE_ACCOUNT_JSON:
+                info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+                return ServiceAccountCredentials.from_service_account_info(info, scopes=GOOGLE_SCOPES)
+            if GOOGLE_SERVICE_ACCOUNT_FILE:
+                if not Path(GOOGLE_SERVICE_ACCOUNT_FILE).exists():
+                    logging.error(f"Service account file not found: {GOOGLE_SERVICE_ACCOUNT_FILE}")
+                    return None
+                return ServiceAccountCredentials.from_service_account_file(
+                    GOOGLE_SERVICE_ACCOUNT_FILE,
+                    scopes=GOOGLE_SCOPES,
+                )
+        except Exception as e:
+            logging.error(f"Failed to load service account credentials: {e}")
+            return None
+
     creds = None
-    if TOKEN_JSON_PATH.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_JSON_PATH), GOOGLE_SCOPES)
-    
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+    try:
+        if TOKEN_JSON_PATH.exists():
+            creds = Credentials.from_authorized_user_file(str(TOKEN_JSON_PATH), GOOGLE_SCOPES)
+    except Exception as e:
+        logging.error(f"Failed to read token file {TOKEN_JSON_PATH}: {e}")
+        creds = None
+
+    if creds and not creds.valid and creds.expired and creds.refresh_token:
+        try:
             creds.refresh(Request())
-        else:
-            if not Path(OAUTH_CLIENT_JSON).exists():
-                logging.error(f"OAuth client file not found: {OAUTH_CLIENT_JSON}")
+        except RefreshError as e:
+            em = str(e).lower()
+            if "invalid_grant" in em or "expired or revoked" in em:
+                logging.error(f"Google OAuth token expired/revoked. Remove {TOKEN_JSON_PATH} and re-authorize.")
+                try:
+                    if TOKEN_JSON_PATH.exists():
+                        TOKEN_JSON_PATH.unlink()
+                except Exception:
+                    pass
                 return None
-            flow = InstalledAppFlow.from_client_secrets_file(OAUTH_CLIENT_JSON, GOOGLE_SCOPES)
-            try:
-                creds = flow.run_local_server(port=0)
-            except Exception:
-                creds = flow.run_console()
-        TOKEN_JSON_PATH.write_text(creds.to_json(), encoding="utf-8")
-    
+            logging.error(f"Google OAuth refresh error: {e}")
+            return None
+        except Exception as e:
+            logging.error(f"Google OAuth refresh error: {e}")
+            return None
+
+    if not creds or not creds.valid:
+        if not ALLOW_OAUTH_INTERACTIVE:
+            logging.error("Google OAuth is not authorized. Run refresh_google_token.py or configure a service account.")
+            return None
+        if not Path(OAUTH_CLIENT_JSON).exists():
+            logging.error(f"OAuth client file not found: {OAUTH_CLIENT_JSON}")
+            return None
+        flow = InstalledAppFlow.from_client_secrets_file(OAUTH_CLIENT_JSON, GOOGLE_SCOPES)
+        try:
+            is_headless = (os.name != "nt") and (not os.getenv("DISPLAY"))
+            if is_headless:
+                creds = flow.run_local_server(
+                    port=int(os.getenv("OAUTH_LOCAL_PORT", "8080")),
+                    open_browser=False,
+                    access_type="offline",
+                    prompt="consent",
+                )
+            else:
+                creds = flow.run_local_server(port=0, access_type="offline", prompt="consent")
+        except Exception:
+            creds = flow.run_console(access_type="offline", prompt="consent")
+
+        try:
+            TOKEN_JSON_PATH.write_text(creds.to_json(), encoding="utf-8")
+        except Exception as e:
+            logging.error(f"Failed to save token file {TOKEN_JSON_PATH}: {e}")
+            return None
+
     return creds
+
+
+def _google_auth_setup_message() -> str:
+    return (
+        "Google не авторизован для экспорта.\n\n"
+        "Вариант 1 (рекомендуется для сервера): Service Account\n"
+        "- GOOGLE_AUTH_MODE=service\n"
+        "- GOOGLE_SERVICE_ACCOUNT_FILE=<path_to_json> (или GOOGLE_SERVICE_ACCOUNT_JSON)\n"
+        "- Дайте доступ сервисному аккаунту к папке DRIVE_FOLDER_ID / BRIGADIER_FOLDER_ID (поделиться папкой по email).\n\n"
+        "Вариант 2: OAuth (разовая авторизация)\n"
+        "- Запустите refresh_google_token.py и перенесите token.json на сервер\n"
+        "- Либо установите ALLOW_OAUTH_INTERACTIVE=true (если есть доступ к интерактивной авторизации)."
+    )
 
 def retry_google_api_call(func, max_retries=3, delay=1):
     """Повторные попытки вызова Google API с обработкой SSL ошибок"""
@@ -1624,6 +1704,13 @@ def retry_google_api_call(func, max_retries=3, delay=1):
             return func()
         except Exception as e:
             error_msg = str(e).lower()
+            if isinstance(e, RefreshError) or ("invalid_grant" in error_msg) or ("expired or revoked" in error_msg):
+                try:
+                    if TOKEN_JSON_PATH.exists():
+                        TOKEN_JSON_PATH.unlink()
+                except Exception:
+                    pass
+                raise
             if any(ssl_error in error_msg for ssl_error in ['ssl', 'eof', 'protocol', 'connection']):
                 if attempt < max_retries - 1:
                     wait_time = delay * (2 ** attempt) + random.uniform(0, 1)
@@ -1984,7 +2071,7 @@ def export_brigadier_reports_to_sheets():
     try:
         creds = get_google_credentials()
         if not creds:
-            return 0, "Ошибка авторизации Google"
+            return 0, _google_auth_setup_message()
 
         sheets_service = build("sheets", "v4", credentials=creds)
         drive = build("drive", "v3", credentials=creds)
@@ -2153,17 +2240,23 @@ def export_brigadier_reports_to_sheets():
 
     except HttpError as e:
         logging.error(f"Google API error during brig export: {e}")
-        return 0, f"Ошибка Google API (бригадиры): {str(e)}"
+        em = str(e).lower()
+        if "invalid_grant" in em or "expired or revoked" in em:
+            return 0, _google_auth_setup_message()
+        return 0, "Ошибка Google API (бригадиры)"
     except Exception as e:
         logging.error(f"Error during brig export: {e}")
-        return 0, f"Ошибка экспорта (бригадиры): {str(e)}"
+        em = str(e).lower()
+        if "invalid_grant" in em or "expired or revoked" in em:
+            return 0, _google_auth_setup_message()
+        return 0, "Ошибка экспорта (бригадиры)"
 
 def export_reports_to_sheets():
     """Экспортировать отчеты в Google Sheets с учетом изменений и удалений"""
     try:
         creds = get_google_credentials()
         if not creds:
-            return 0, "Ошибка авторизации Google"
+            return 0, _google_auth_setup_message()
         
         sheets_service = build("sheets", "v4", credentials=creds)
         drive = build("drive", "v3", credentials=creds)
@@ -2360,10 +2453,16 @@ def export_reports_to_sheets():
         
     except HttpError as e:
         logging.error(f"Google API error during export: {e}")
-        return 0, f"Ошибка Google API: {str(e)}"
+        em = str(e).lower()
+        if "invalid_grant" in em or "expired or revoked" in em:
+            return 0, _google_auth_setup_message()
+        return 0, "Ошибка Google API"
     except Exception as e:
         logging.error(f"Error during export: {e}")
-        return 0, f"Ошибка экспорта: {str(e)}"
+        em = str(e).lower()
+        if "invalid_grant" in em or "expired or revoked" in em:
+            return 0, _google_auth_setup_message()
+        return 0, "Ошибка экспорта"
 
 def check_and_create_next_month_sheet():
     """Проверить и создать таблицу для следующего месяца за 3 дня до конца текущего"""
@@ -9139,7 +9238,11 @@ async def adm_export(c: CallbackQuery):
         
     except Exception as e:
         logging.error(f"Export error in handler: {e}")
-        text = f"❌ Ошибка экспорта: {str(e)}"
+        em = str(e).lower()
+        if "invalid_grant" in em or "expired or revoked" in em:
+            text = "❌ " + _google_auth_setup_message()
+        else:
+            text = "❌ Ошибка экспорта"
     
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id, text,
                         reply_markup=admin_menu_kb())
