@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Terra — панель</title>
+  <link rel="stylesheet" href="./app.css?v=10" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar" hidden></header>
+
+    <main class="content">
+      <section id="screenDashboard">
+      <section class="card profile">
+        <button class="iconBtn" id="settingsBtn" type="button" aria-label="Настройки">⚙</button>
+
+        <div class="profile__row">
+          <div class="avatar" aria-hidden="true">
+            <div class="avatar__inner" id="avatar">T</div>
+          </div>
+          <div class="profile__meta">
+            <div class="profile__name" id="fullName">—</div>
+            <div class="profile__role" id="role">—</div>
+          </div>
+        </div>
+
+        <div class="miniStats">
+          <div class="miniStat">
+            <div class="miniStat__label">Неделя</div>
+            <div class="miniStat__value" id="weekValue">—</div>
+            <div class="miniStat__hint" id="weekHint">—</div>
+          </div>
+          <div class="miniStat">
+            <div class="miniStat__label">Месяц</div>
+            <div class="miniStat__value" id="monthValue">—</div>
+            <div class="miniStat__hint" id="monthHint">—</div>
+          </div>
+        </div>
+
+        <section class="weather weather--clouds" id="weatherCard" style="margin-top:12px">
+          <div class="weather__top">
+            <div class="weather__place" id="weatherPlace">—</div>
+            <div class="weather__temp" id="weatherTemp">—</div>
+          </div>
+          <div class="weather__bottom">
+            <div class="weather__desc" id="weatherDesc">—</div>
+            <div class="weather__meta">
+              <span id="weatherPrecip">—</span>
+              <span id="weatherUpdated">—</span>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="card">
+        <div class="sectionTitle">Действия</div>
+        <div class="actions" id="actions"></div>
+      </section>
+
+      </section>
+
+      <section class="card" id="screenOtd" hidden>
+        <div class="sectionTitle">ОТД — добавить часы</div>
+        <div style="display:flex; flex-direction:column; gap:10px">
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Дата</div>
+            <div class="inputWrap">
+              <input id="otdDate" type="date" class="inputInner" />
+            </div>
+          </label>
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Часы</div>
+            <input id="otdHours" type="number" min="1" max="24" step="1" placeholder="8" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+          </label>
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Тип работы</div>
+            <select id="otdWorkType" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)">
+              <option value="">Выберите</option>
+              <option value="tech">Техника</option>
+              <option value="hand">Ручная</option>
+            </select>
+          </label>
+
+          <label id="otdMachineKindWrap" hidden>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Техника (тип)</div>
+            <select id="otdMachineKind" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
+          </label>
+
+          <label id="otdMachineNameWrap" hidden>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Техника (название)</div>
+            <select id="otdMachineName" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
+          </label>
+
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Вид работы</div>
+            <select id="otdActivity" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
+          </label>
+
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Локация / поле</div>
+            <select id="otdLocation" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
+          </label>
+
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Культура</div>
+            <select id="otdCrop" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
+          </label>
+
+          <label id="otdTripsWrap" hidden>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Рейсы (КамАЗ)</div>
+            <input id="otdTrips" type="number" min="0" step="1" placeholder="0" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+          </label>
+
+          <button class="btn" id="otdSubmit" type="button">Сохранить</button>
+          <div id="otdResult" style="font-size:13px; color:var(--muted)"></div>
+        </div>
+      </section>
+
+      <section class="card" id="screenStats" hidden>
+        <div class="sectionTitle">Статистика</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px">
+          <button class="btn" id="statsToday" type="button">Сегодня</button>
+          <button class="btn" id="statsWeek" type="button">Неделя</button>
+          <button class="btn" id="statsMonth" type="button">Месяц</button>
+        </div>
+        <div id="statsResult" style="margin-top:10px; font-size:13px; color:var(--muted)"></div>
+      </section>
+
+      <section class="card" id="screenSettings" hidden>
+        <div class="sectionTitle">Настройки</div>
+        <div style="display:flex; flex-direction:column; gap:10px">
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Фамилия Имя</div>
+            <input id="settingsFullName" type="text" placeholder="Иванов Иван" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+          </label>
+          <button class="btn" id="settingsSave" type="button">Сохранить</button>
+          <div id="settingsResult" style="font-size:13px; color:var(--muted)"></div>
+        </div>
+      </section>
+
+      <section class="card" id="screenBrig" hidden>
+        <div class="sectionTitle">ОБ — отчёт бригадира</div>
+        <div style="display:flex; flex-direction:column; gap:10px">
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Дата</div>
+            <div class="inputWrap">
+              <input id="brigDate" type="date" class="inputInner" />
+            </div>
+          </label>
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Культура</div>
+            <select id="brigCrop" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
+          </label>
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Поле</div>
+            <select id="brigField" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
+          </label>
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Рядов</div>
+            <input id="brigRows" type="number" min="0" step="1" placeholder="0" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+          </label>
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Людей</div>
+            <input id="brigWorkers" type="number" min="0" step="1" placeholder="0" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+          </label>
+          <label>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Мешков</div>
+            <input id="brigBags" type="number" min="0" step="1" placeholder="0" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+          </label>
+          <button class="btn" id="brigSubmit" type="button">Сохранить</button>
+          <div id="brigResult" style="font-size:13px; color:var(--muted)"></div>
+        </div>
+      </section>
+
+      <section class="card" id="screenWeatherLocations" hidden>
+        <div class="sectionTitle">Локации погоды</div>
+        <div class="hintText">Нажми «+», чтобы добавить область. Пины можно двигать, добавлять и удалять.</div>
+        <div class="locGrid" id="weatherLocList"></div>
+        <button class="plusCard" id="weatherLocAdd" type="button" aria-label="Добавить локацию">
+          <div class="plusCard__inner">
+            <div class="plusCard__plus">+</div>
+            <div class="plusCard__text">Добавить локацию</div>
+          </div>
+        </button>
+      </section>
+
+      <section class="card" id="screenWeatherLocEdit" hidden>
+        <div class="sectionTitle">Новая локация</div>
+        <label>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Название</div>
+          <input id="weatherLocName" type="text" placeholder="Поле №7" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+        </label>
+
+        <div class="mapWrap" id="weatherMapWrap">
+          <div class="map" id="weatherMap"></div>
+        </div>
+
+        <div class="mapTools">
+          <button class="btn btn--secondary" id="weatherPinAdd" type="button">+ Пин</button>
+          <button class="btn btn--secondary" id="weatherPinsReset" type="button">Сброс (квадрат)</button>
+        </div>
+        <button class="btn" id="weatherLocSave" type="button">Сохранить локацию</button>
+        <div id="weatherLocEditResult" style="font-size:13px; color:var(--muted); margin-top:8px"></div>
+      </section>
+
+      <section class="card" id="screenWeatherLocView" hidden>
+        <div class="sectionTitle" id="weatherViewTitle">Погода</div>
+        <section class="weather weather--clouds" id="weatherViewCard" style="margin-top:10px">
+          <div class="weather__top">
+            <div class="weather__place" id="weatherViewPlace">—</div>
+            <div class="weather__temp" id="weatherViewTemp">—</div>
+          </div>
+          <div class="weather__bottom">
+            <div class="weather__desc" id="weatherViewDesc">—</div>
+            <div class="weather__meta">
+              <span id="weatherViewPrecip">—</span>
+              <span id="weatherViewUpdated">—</span>
+            </div>
+          </div>
+        </section>
+        <div class="sectionTitle" style="margin-top:12px">Осадки на 24 часа</div>
+        <div class="forecast" id="weatherViewForecast"></div>
+        <button class="btn btn--secondary" id="weatherLocDelete" type="button" style="margin-top:10px">Удалить локацию</button>
+      </section>
+
+      <section class="card muted" id="errorBox" hidden>
+        <div class="errorTitle">Не удалось загрузить данные</div>
+        <div class="errorText" id="errorText"></div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <button class="btn btn--secondary" id="backBtn" type="button" hidden>Назад</button>
+      <button class="btn btn--secondary" id="closeBtn" type="button">Закрыть</button>
+    </footer>
+  </div>
+
+  <script src="./app.js?v=10"></script>
+</body>
+</html>

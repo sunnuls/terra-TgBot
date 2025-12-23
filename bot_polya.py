@@ -13,8 +13,13 @@ from pathlib import Path
 import calendar
 import time
 import random
+import json
+import hmac
+import hashlib
+from urllib.parse import parse_qsl
 
 import logging
+from aiohttp import web
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram import Bot, Dispatcher, Router, F
@@ -24,6 +29,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    WebAppInfo,
     ReplyKeyboardMarkup,
     KeyboardButton,
     BotCommand,
@@ -127,6 +133,483 @@ def _runtime_version_info(user_id: int, username: Optional[str]) -> str:
         f"role: <code>{role}</code>\n"
         f"user: <code>{user_id}</code> @{uname if uname else '-'}"
     )
+
+
+def _request_init_data(request: web.Request) -> str:
+    """Extract initData from request for GET/POST APIs.
+
+    Supported:
+    - JSON body field initData (handled in specific handlers)
+    - Header X-Telegram-InitData
+    - Authorization: tma <initData>
+    """
+    try:
+        h = request.headers.get("X-Telegram-InitData", "")
+        if h:
+            return h
+    except Exception:
+        pass
+    try:
+        auth = request.headers.get("Authorization", "")
+        if auth.lower().startswith("tma "):
+            return auth.split(" ", 1)[1].strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _web_auth_context_from_cookie(request: web.Request) -> Optional[dict]:
+    sid = request.cookies.get(WEBAPP_SESSION_COOKIE, "")
+    s = get_web_session(sid)
+    if not s:
+        return None
+    touch_web_session(sid)
+    return {
+        "user_id": int(s["user_id"]),
+        "username": str(s.get("username") or ""),
+        "first_name": str(s.get("first_name") or ""),
+        "role": str(s.get("role") or "user"),
+        "session_id": sid,
+    }
+
+
+def _web_auth_context_from_init_data(init_data: str) -> dict:
+    v = _verify_webapp_init_data(init_data)
+    user = v.get("user") or {}
+    user_id = int(v["user_id"])
+    username = str(user.get("username") or "")
+    first_name = str(user.get("first_name") or "")
+    return {"user_id": user_id, "username": username, "first_name": first_name}
+
+
+def _web_require_auth(request: web.Request, *, init_data: str = "") -> Tuple[Optional[dict], Optional[web.StreamResponse]]:
+    """Returns (ctx, error_response). ctx includes user_id/username/first_name/role."""
+    init_db()
+
+    if init_data:
+        try:
+            base = _web_auth_context_from_init_data(init_data)
+        except Exception as e:
+            return None, web.json_response({"error": str(e)}, status=401)
+        user_id = int(base["user_id"])
+        username = str(base.get("username") or "")
+        first_name = str(base.get("first_name") or "")
+        u = get_user(user_id)
+        if not u:
+            upsert_user(user_id, None, TZ, username)
+            u = get_user(user_id) or {}
+        role = get_role_label(user_id)
+        return {"user_id": user_id, "username": username, "first_name": first_name, "role": role, "user": u}, None
+
+    cookie_ctx = _web_auth_context_from_cookie(request)
+    if cookie_ctx:
+        user_id = int(cookie_ctx["user_id"])
+        u = get_user(user_id)
+        if not u:
+            upsert_user(user_id, None, TZ, cookie_ctx.get("username") or "")
+            u = get_user(user_id) or {}
+        # role is still derived from canonical logic to keep in sync with bot
+        role = get_role_label(user_id)
+        cookie_ctx["role"] = role
+        cookie_ctx["user"] = u
+        return cookie_ctx, None
+
+    if WEBAPP_DEV_USER_ID is not None:
+        user_id = int(WEBAPP_DEV_USER_ID)
+        u = get_user(user_id)
+        if not u:
+            upsert_user(user_id, None, TZ, "")
+            u = get_user(user_id) or {}
+        role = get_role_label(user_id)
+        return {"user_id": user_id, "username": "", "first_name": "", "role": role, "user": u}, None
+
+    return None, web.json_response({"error": "unauthorized"}, status=401)
+
+
+def _web_require_admin(ctx: dict) -> Optional[web.StreamResponse]:
+    if not _is_miniapp_admin_role((ctx or {}).get("role") or ""):
+        return web.json_response({"error": "forbidden"}, status=403)
+    return None
+
+
+# -----------------------------
+# Web API services (business logic reuse)
+# -----------------------------
+
+def svc_menu(*, role: str) -> dict:
+    return {"actions": _webapp_actions_for_role(role)}
+
+
+def svc_dictionaries() -> dict:
+    # Optimized for mobile: single payload to build pickers.
+    return {
+        "groups": {
+            "activity": {"tech": GROUP_TECH, "hand": GROUP_HAND},
+            "location": {"fields": GROUP_FIELDS, "ware": GROUP_WARE},
+        },
+        "activities": {
+            "tech": list_activities(GROUP_TECH),
+            "hand": list_activities(GROUP_HAND),
+        },
+        "locations": {
+            "fields": list_locations(GROUP_FIELDS),
+            "ware": list_locations(GROUP_WARE),
+        },
+        "crops": list_crops(),
+        "machine_kinds": list_machine_kinds(limit=50, offset=0),
+        "otd": {
+            "tractor_works": list(OTD_TRACTOR_WORKS),
+            "hand_works": list(OTD_HAND_WORKS),
+            "fields": list(OTD_FIELDS),
+            "crops": list(OTD_CROPS),
+            "kamaz_cargo": list(KAMAZ_CARGO_LIST),
+        },
+        "brig": {
+            # For OB v2 in Mini App
+            "crops": list(CROPS_LIST),
+            "fields": list(FIELD_LOCATIONS),
+        },
+    }
+
+
+def _as_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _validate_full_name(name: str) -> Optional[str]:
+    text = (name or "").strip()
+    if len(text) < 3 or " " not in text:
+        return None
+    return text
+
+
+def svc_profile_set_name(*, user_id: int, username: str, full_name: str) -> Tuple[bool, str, Optional[dict]]:
+    name = _validate_full_name(full_name)
+    if not name:
+        return False, "Введите Фамилию и Имя (через пробел)", None
+    u = get_user(user_id) or {}
+    upsert_user(user_id, name, (u.get("tz") or TZ), username)
+    return True, "ok", get_user(user_id)
+
+
+def _report_required_fields(payload: dict) -> List[str]:
+    missing = []
+    for k in ("work_date", "hours"):
+        if not (payload or {}).get(k):
+            missing.append(k)
+    # For compatibility with bot's OTD logic:
+    # - If machine_mode is 'single' (KamAZ in bot), activity may be absent.
+    machine_mode = (payload or {}).get("machine_mode")
+    if machine_mode != "single":
+        for k in ("activity", "crop"):
+            if not (payload or {}).get(k):
+                missing.append(k)
+    else:
+        for k in ("crop", "trips", "location"):
+            if not (payload or {}).get(k):
+                missing.append(k)
+    return missing
+
+
+def svc_create_report(*, ctx: dict, payload: dict) -> Tuple[Optional[int], Optional[dict], Optional[str]]:
+    """Create OTD report with the same validation rules as bot."""
+    user_id = int(ctx["user_id"])
+    u = (ctx.get("user") or get_user(user_id) or {})
+
+    missing = _report_required_fields(payload)
+    if missing:
+        return None, None, f"missing: {', '.join(missing)}"
+
+    work_date = str(payload.get("work_date"))
+    hours = _as_int(payload.get("hours"), 0)
+    if hours <= 0 or hours > 24:
+        return None, None, "hours must be 1..24"
+
+    already = sum_hours_for_user_date(user_id, work_date)
+    if already + hours > 24:
+        return None, None, "day hours limit exceeded"
+
+    location = str(payload.get("location") or "—")
+    loc_grp = str(payload.get("location_grp") or "—")
+    activity = str(payload.get("activity") or "—")
+    act_grp = str(payload.get("activity_grp") or payload.get("act_grp") or "—")
+    machine_type = payload.get("machine_type")
+    machine_name = payload.get("machine_name")
+    crop = payload.get("crop")
+    trips = payload.get("trips")
+    if trips is not None:
+        trips = _as_int(trips, 0)
+
+    rid = insert_report(
+        user_id=user_id,
+        reg_name=(u.get("full_name") or ""),
+        username=(u.get("username") or ctx.get("username") or ""),
+        location=location,
+        loc_grp=loc_grp,
+        activity=activity,
+        act_grp=act_grp,
+        work_date=work_date,
+        hours=hours,
+        chat_id=0,
+        machine_type=machine_type,
+        machine_name=machine_name,
+        crop=crop,
+        trips=trips,
+    )
+    report = get_report(rid)
+    return rid, report, None
+
+
+def svc_stats(*, ctx: dict, period: str) -> dict:
+    role = str(ctx.get("role") or "user")
+    start, end = _stats_period_range(period)
+    user_id = int(ctx["user_id"])
+
+    if role == "admin":
+        total = _sum_hours_for_all_range(start, end)
+    else:
+        total = _sum_hours_for_user_range(user_id, start, end)
+
+    return {
+        "period": period,
+        "range": {"start": start.isoformat(), "end": end.isoformat()},
+        "total_hours": int(total),
+    }
+
+
+# -----------------------------
+# Web API controllers (aiohttp handlers)
+# -----------------------------
+
+async def api_get_me(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    role = ctx.get("role")
+    u = ctx.get("user") or {}
+    return web.json_response({"profile": _web_profile_payload(user_id=ctx["user_id"], u=u, role=role, first_name=ctx.get("first_name") or ""), **svc_menu(role=role)})
+
+
+async def api_get_menu(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    return web.json_response(svc_menu(role=str(ctx.get("role") or "user")))
+
+
+async def api_get_dictionaries(request: web.Request) -> web.StreamResponse:
+    # dictionaries are shared, but still require auth (to avoid leaking org data)
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    return web.json_response(svc_dictionaries())
+
+
+async def api_post_report(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+
+    rid, report, e = svc_create_report(ctx=ctx, payload=payload or {})
+    if e:
+        return web.json_response({"error": e}, status=422)
+    try:
+        await request_export_soon(otd=True, brig=False, reason="api:report:create")
+    except Exception:
+        pass
+    return web.json_response({"ok": True, "report": report}, status=201)
+
+
+async def api_get_stats(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    period = (request.query.get("period") or "week").strip().lower()
+    if period not in {"today", "week", "month"}:
+        return web.json_response({"error": "invalid period"}, status=422)
+    return web.json_response(svc_stats(ctx=ctx, period=period))
+
+
+async def api_get_machine_items(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    try:
+        kind_id = int((request.query.get("kind_id") or "0").strip())
+    except Exception:
+        kind_id = 0
+    if kind_id <= 0:
+        return web.json_response({"error": "kind_id required"}, status=422)
+    return web.json_response({"items": list_machine_items(kind_id, limit=200, offset=0)})
+
+
+async def api_post_brig_ob(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+
+    work_date = str((payload or {}).get("work_date") or "").strip()
+    crop = str((payload or {}).get("crop") or "").strip()
+    field = str((payload or {}).get("field") or "").strip()
+    rows = (payload or {}).get("rows")
+    bags = (payload or {}).get("bags")
+    workers = (payload or {}).get("workers")
+
+    if not work_date:
+        return web.json_response({"error": "work_date required"}, status=422)
+    if not crop:
+        return web.json_response({"error": "crop required"}, status=422)
+    if not field:
+        return web.json_response({"error": "field required"}, status=422)
+
+    try:
+        rows_i = None if rows in (None, "") else int(rows)
+        bags_i = None if bags in (None, "") else int(bags)
+        workers_i = None if workers in (None, "") else int(workers)
+    except Exception:
+        return web.json_response({"error": "rows/bags/workers must be integers"}, status=422)
+
+    user_id = int(ctx["user_id"])
+    u = get_user(user_id) or {}
+    username = str(u.get("username") or ctx.get("username") or "")
+    insert_brig_report(
+        user_id=user_id,
+        username=username,
+        work_type=crop,
+        field=field,
+        shift="—",
+        rows=rows_i,
+        bags=bags_i,
+        workers=workers_i,
+        work_date=work_date,
+    )
+    try:
+        await request_export_soon(otd=False, brig=True, reason="api:brig:ob")
+    except Exception:
+        pass
+    return web.json_response({"ok": True}, status=201)
+
+
+async def api_post_profile_name(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+
+    ok, msg, u = svc_profile_set_name(
+        user_id=int(ctx["user_id"]),
+        username=str(ctx.get("username") or ""),
+        full_name=str((payload or {}).get("full_name") or (payload or {}).get("name") or ""),
+    )
+    if not ok:
+        return web.json_response({"error": msg}, status=422)
+    role = get_role_label(int(ctx["user_id"]))
+    return web.json_response({"ok": True, "profile": _web_profile_payload(user_id=ctx["user_id"], u=u or {}, role=role, first_name=ctx.get("first_name") or ""), **svc_menu(role=role)})
+
+
+async def api_admin_roles_get(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute("SELECT user_id, role, added_by, added_at FROM user_roles ORDER BY role, user_id").fetchall()
+    items = [{"user_id": int(r[0]), "role": r[1], "added_by": int(r[2]) if r[2] is not None else None, "added_at": r[3]} for r in rows]
+    return web.json_response({"items": items})
+
+
+async def api_admin_roles_post(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+
+    target_id = _as_int((payload or {}).get("user_id"), 0)
+    role = str((payload or {}).get("role") or "").strip().lower()
+    if target_id <= 0 or role not in {"it", "tim", "brigadier"}:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    set_role(target_id, role, int(ctx["user_id"]))
+    if role == "brigadier":
+        add_brigadier(target_id, None, None, int(ctx["user_id"]))
+    return web.json_response({"ok": True})
+
+
+async def api_admin_roles_delete(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+
+    user_id = _as_int(request.match_info.get("user_id"), 0)
+    role = (request.query.get("role") or "").strip().lower() or None
+    ok = clear_role(user_id, role)
+    if role == "brigadier" or role is None:
+        try:
+            remove_brigadier(user_id)
+        except Exception:
+            pass
+    return web.json_response({"ok": bool(ok)})
+
+
+async def api_admin_export_post(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+
+    # запускаем экспорт в фоне (через дебаунсер/lock), не блокируем ответ
+    try:
+        await request_export_soon(otd=True, brig=True, reason="api:admin:export")
+    except Exception:
+        pass
+    return web.json_response({"ok": True, "status": "scheduled"})
 
 
 TZ = os.getenv("TZ", "Europe/Moscow").strip()
@@ -240,6 +723,16 @@ def _env_int(name: str, default: Optional[int] = None) -> Optional[int]:
     except ValueError:
         return default
 
+WEBAPP_HOST = os.getenv("WEBAPP_HOST", "0.0.0.0").strip() or "0.0.0.0"
+WEBAPP_PORT = _env_int("WEBAPP_PORT", _env_int("PORT", 8080) or 8080) or 8080
+WEBAPP_BASE_URL = os.getenv("WEBAPP_BASE_URL", "").strip()
+WEBAPP_URL = (WEBAPP_BASE_URL.rstrip("/") + "/webapp/") if WEBAPP_BASE_URL else ""
+WEBAPP_DEV_USER_ID = _env_int("WEBAPP_DEV_USER_ID")
+WEBAPP_AUTH_MAX_AGE_SEC = int(os.getenv("WEBAPP_AUTH_MAX_AGE_SEC", "86400"))
+WEBAPP_SESSION_TTL_SEC = int(os.getenv("WEBAPP_SESSION_TTL_SEC", "86400"))
+WEBAPP_SESSION_COOKIE = os.getenv("WEBAPP_SESSION_COOKIE", "tma_session").strip() or "tma_session"
+WEBAPP_COOKIE_SECURE = os.getenv("WEBAPP_COOKIE_SECURE", "true").lower() == "true"
+
 WORK_CHAT_ID = _env_int("WORK_CHAT_ID")
 WORK_TOPIC_ID = _env_int("WORK_TOPIC_ID")
 # if not set, stats go to the same place as the menu
@@ -271,7 +764,7 @@ REPORTS_THREAD_ID = _env_int("REPORTS_THREAD_ID")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip()
 
 # "Только отчёты": в этом чате бот не отвечает на команды/текст,
-# а сообщения обычных пользователей удаляются.
+# а сообщения обычных пользователей удаляются (только отчёты от бота).
 READONLY_CHAT_ID = _env_int("READONLY_CHAT_ID")
 
 # -----------------------------
@@ -363,6 +856,16 @@ OTD_HAND_WORKS = [
 def connect():
     return sqlite3.connect(DB_PATH)
 
+
+def table_cols(table_name: str) -> List[str]:
+    """Return column names for a table (or empty list if table doesn't exist)."""
+    try:
+        with connect() as con, closing(con.cursor()) as c:
+            rows = c.execute(f"PRAGMA table_info({table_name})").fetchall()
+            return [r[1] for r in (rows or []) if r and len(r) > 1]
+    except Exception:
+        return []
+
 def init_db():
     with connect() as con, closing(con.cursor()) as c:
         # Базовые таблицы (создадутся, если их нет)
@@ -407,44 +910,19 @@ def init_db():
         )
         """)
 
-        # --- миграции существующих таблиц ---
-        def table_cols(table: str):
-            return {r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
-
-        # users
-        ucols = table_cols("users")
-        if "username" not in ucols:
-            c.execute("ALTER TABLE users ADD COLUMN username TEXT")
-        if "phone" not in ucols:
-            c.execute("ALTER TABLE users ADD COLUMN phone TEXT")
-        if "tz" not in ucols:
-            c.execute("ALTER TABLE users ADD COLUMN tz TEXT")
-        # уникальность телефона (если задан) — один номер = один пользователь
-        try:
-            c.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique "
-                "ON users(phone) WHERE phone IS NOT NULL AND TRIM(phone)<>''"
-            )
-        except sqlite3.IntegrityError:
-            # Если в старой базе уже есть дубли телефонов — не падаем.
-            logging.warning("Cannot create unique phone index (duplicates exist).")
-
-        # reports
-        rcols = table_cols("reports")
-        if "reg_name" not in rcols:
-            c.execute("ALTER TABLE reports ADD COLUMN reg_name TEXT")
-        if "location_grp" not in rcols:
-            c.execute("ALTER TABLE reports ADD COLUMN location_grp TEXT")
-        if "activity_grp" not in rcols:
-            c.execute("ALTER TABLE reports ADD COLUMN activity_grp TEXT")
-        if "machine_type" not in rcols:
-            c.execute("ALTER TABLE reports ADD COLUMN machine_type TEXT")
-        if "machine_name" not in rcols:
-            c.execute("ALTER TABLE reports ADD COLUMN machine_name TEXT")
-        if "crop" not in rcols:
-            c.execute("ALTER TABLE reports ADD COLUMN crop TEXT")
-        if "trips" not in rcols:
-            c.execute("ALTER TABLE reports ADD COLUMN trips INTEGER")
+        # server-side sessions for WebApp (no JWT)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS web_sessions(
+          session_id  TEXT PRIMARY KEY,
+          user_id     INTEGER,
+          username    TEXT,
+          first_name  TEXT,
+          role        TEXT,
+          created_at  TEXT,
+          last_seen   TEXT,
+          expires_at  TEXT
+        )
+        """)
 
         # таблица для связи отчёта и сообщения в топике статистики
         c.execute("""
@@ -967,6 +1445,7 @@ def add_activity(grp: str, name: str) -> bool:
 
 def list_crops() -> List[str]:
     with connect() as con, closing(con.cursor()) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY)")
         rows = c.execute("SELECT name FROM crops ORDER BY name").fetchall()
         return [r[0] for r in rows]
 
@@ -3225,6 +3704,8 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
         kb.button(text="📊 Статистика", callback_data="menu:stats")
         kb.button(text="⚙️ Настройки", callback_data="menu:name")
         kb.adjust(2, 1)
+        if WEBAPP_URL:
+            kb.row(InlineKeyboardButton(text="📱 Приложение", web_app=WebAppInfo(url=WEBAPP_URL)))
         return kb.as_markup()
 
     if role == "it":
@@ -3232,6 +3713,8 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
         kb.button(text="📊 Статистика", callback_data="menu:stats")
         kb.button(text="⚙️ Настройки", callback_data="menu:name")
         kb.adjust(2, 1)
+        if WEBAPP_URL:
+            kb.row(InlineKeyboardButton(text="📱 Приложение", web_app=WebAppInfo(url=WEBAPP_URL)))
         return kb.as_markup()
 
     if role == "brigadier":
@@ -3241,6 +3724,8 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
         kb.button(text="Статистика", callback_data="menu:stats")
         kb.button(text="Настройки", callback_data="menu:name")
         kb.adjust(2, 2)
+        if WEBAPP_URL:
+            kb.row(InlineKeyboardButton(text="📱 Приложение", web_app=WebAppInfo(url=WEBAPP_URL)))
         return kb.as_markup()
 
     if role == "admin":
@@ -3249,6 +3734,8 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
         kb.button(text="⚙️ Настройки", callback_data="menu:name")
         kb.button(text="⚙️ Админ", callback_data="menu:admin")
         kb.adjust(2, 2)
+        if WEBAPP_URL:
+            kb.row(InlineKeyboardButton(text="📱 Приложение", web_app=WebAppInfo(url=WEBAPP_URL)))
         return kb.as_markup()
 
     # обычный пользователь
@@ -3256,6 +3743,8 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
     kb.button(text="Статистика", callback_data="menu:stats")
     kb.button(text="Настройки", callback_data="menu:name")
     kb.adjust(2, 1)
+    if WEBAPP_URL:
+        kb.row(InlineKeyboardButton(text="📱 Приложение", web_app=WebAppInfo(url=WEBAPP_URL)))
     return kb.as_markup()
 
 def settings_menu_kb() -> InlineKeyboardMarkup:
@@ -4336,6 +4825,75 @@ async def cmd_menu(message: Message, state: FSMContext):
     
     await show_main_menu(message.chat.id, message.from_user.id, u, "Меню")
 
+@router.message(F.web_app_data)
+async def webapp_data_message(message: Message, state: FSMContext):
+    if not _is_allowed_topic(message):
+        return
+    if not message.from_user or message.from_user.is_bot:
+        return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    raw = getattr(getattr(message, "web_app_data", None), "data", None) or ""
+    try:
+        payload = json.loads(raw) if raw else {}
+    except Exception:
+        payload = {}
+    action = (payload or {}).get("action")
+    uid = message.from_user.id
+
+    if action == "otd":
+        u = await _otd_require_user(message, state)
+        if not u:
+            return
+        await state.clear()
+        await state.update_data(otd={"reg_name": u.get("full_name"), "username": u.get("username"), "act_grp": None})
+        await state.set_state(OtdFSM.pick_date)
+        await _edit_or_send(message.bot, message.chat.id, uid, "ОТД: выберите дату:", reply_markup=otd_days_keyboard())
+        return
+
+    if action == "stats":
+        role = get_role_label(uid)
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            uid,
+            "Выберите период статистики:",
+            reply_markup=_stats_period_menu_kb(role),
+        )
+        return
+
+    if action == "settings":
+        await state.clear()
+        await show_settings_menu(message.bot, message.chat.id, uid)
+        return
+
+    if action == "brig_report":
+        if not (is_brigadier(uid, message.from_user.username) or is_admin(message)):
+            await _edit_or_send(message.bot, message.chat.id, uid, "Нет прав", reply_markup=_ui_back_to_root_kb())
+            return
+        await state.update_data(brig={})
+        await state.set_state(BrigFSM.pick_date)
+        await _edit_or_send(
+            message.bot,
+            message.chat.id,
+            uid,
+            "👷 Отчет бригадира\nВыберите дату:",
+            reply_markup=_brig_date_kb(),
+        )
+        return
+
+    if action == "admin":
+        if not is_admin(message):
+            await _edit_or_send(message.bot, message.chat.id, uid, "Нет прав", reply_markup=_ui_back_to_root_kb())
+            return
+        await _edit_or_send(message.bot, message.chat.id, uid, "⚙️ <b>Админ-панель</b>:", reply_markup=admin_menu_kb())
+        return
+
+    await show_main_menu(message.chat.id, uid, get_user(uid) or {}, "")
+
 @router.message(Command("phone"))
 async def cmd_phone(message: Message, state: FSMContext):
     if not _is_allowed_topic(message):
@@ -4539,6 +5097,50 @@ def _stats_period_menu_kb(role: str) -> InlineKeyboardMarkup:
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:root"))
     kb.adjust(3)
     return kb.as_markup()
+
+def _stats_period_range(period: str) -> tuple[date, date]:
+    today = date.today()
+    if period == "today":
+        return today, today
+    if period == "month":
+        start = today.replace(day=1)
+        if start.month == 12:
+            end = date(start.year + 1, 1, 1) - timedelta(days=1)
+        else:
+            end = date(start.year, start.month + 1, 1) - timedelta(days=1)
+        return start, end
+    return today - timedelta(days=6), today
+
+def _render_admin_otd_stats(rows: list, period: str, start: date, end: date) -> str:
+    """
+    rows: (user_id, full_name, username, work_date, location, activity, h)
+    """
+    period_str = _stats_period_label(period, start, end)
+    if not rows:
+        return f"📊 <b>ОТД</b> за {period_str}: нет записей."
+
+    by_user: dict[int, dict] = {}
+    for uid, full_name, uname, d, loc, act, h in rows:
+        u = by_user.setdefault(int(uid), {"name": (full_name or (uname and "@" + uname) or str(uid)), "days": {}})
+        u["days"].setdefault(d, []).append((loc, act, int(h or 0)))
+
+    lines = [f"📊 <b>ОТД</b> за {period_str}:"]
+    total_all = 0
+    ordered_users = sorted(by_user.items(), key=lambda kv: (kv[1].get("name") or "").lower())
+    for _, u in ordered_users:
+        lines.append(f"\n👤 <b>{html.escape(str(u.get('name') or '—'))}</b>")
+        subtotal = 0
+        days = u.get("days") or {}
+        for d in sorted(days.keys(), reverse=True):
+            lines.append(f"\n<b>{d}</b>")
+            for loc, act, h in days[d]:
+                lines.append(f"• {loc} — {act}: <b>{h}</b> ч")
+                subtotal += h
+        lines.append(f"\n— Итого сотрудник: <b>{subtotal}</b> ч")
+        total_all += subtotal
+
+    lines.append(f"\nИтого всего: <b>{total_all}</b> ч")
+    return "\n".join(lines)
 
 def _is_admin_user_id(user_id: int) -> bool:
     # admin определяется через ADMIN_IDS / ADMIN_USERNAMES (get_role_label)
@@ -6691,60 +7293,6 @@ def _render_brig_stats_otd(rows: list, period: str, start: date, end: date) -> s
             total += h
     parts.append(f"\nИтого: <b>{total}</b> ч")
     return "\n".join(parts)
-
-def _stats_period_range(period: str) -> tuple[date, date]:
-    today = date.today()
-    if period == "today":
-        return today, today
-    if period == "month":
-        start = today.replace(day=1)
-        # последний день месяца
-        if start.month == 12:
-            end = date(start.year + 1, 1, 1) - timedelta(days=1)
-        else:
-            end = date(start.year, start.month + 1, 1) - timedelta(days=1)
-        return start, end
-    # week (по умолчанию)
-    return today - timedelta(days=6), today
-
-def _render_admin_otd_stats(rows: list, period: str, start: date, end: date) -> str:
-    """
-    rows: (user_id, full_name, username, work_date, location, activity, h)
-    """
-    if period == "today":
-        period_str = "сегодня"
-    elif period == "month":
-        period_str = f"месяц ({start.strftime('%d.%m')}–{end.strftime('%d.%m')})"
-    else:
-        period_str = f"неделю ({start.strftime('%d.%m')}–{end.strftime('%d.%m')})"
-
-    if not rows:
-        return f"📊 <b>ОТД</b> за {period_str}: нет записей."
-
-    # group: user -> date -> list
-    by_user: dict[int, dict] = {}
-    for uid, full_name, uname, d, loc, act, h in rows:
-        u = by_user.setdefault(int(uid), {"name": (full_name or (uname and "@"+uname) or str(uid)), "days": {}})
-        u["days"].setdefault(d, []).append((loc, act, int(h or 0)))
-
-    lines = [f"📊 <b>ОТД</b> за {period_str}:"]
-    total_all = 0
-    # стабильная сортировка по имени
-    ordered_users = sorted(by_user.items(), key=lambda kv: (kv[1].get("name") or "").lower())
-    for _, u in ordered_users:
-        lines.append(f"\n👤 <b>{html.escape(str(u.get('name') or '—'))}</b>")
-        subtotal = 0
-        days = u.get("days") or {}
-        for d in sorted(days.keys(), reverse=True):
-            lines.append(f"\n<b>{d}</b>")
-            for loc, act, h in days[d]:
-                lines.append(f"• {loc} — {act}: <b>{h}</b> ч")
-                subtotal += h
-        lines.append(f"\n— Итого сотрудник: <b>{subtotal}</b> ч")
-        total_all += subtotal
-
-    lines.append(f"\nИтого всего: <b>{total_all}</b> ч")
-    return "\n".join(lines)
 
 def _stats_result_kb(*, role: str, period: str) -> InlineKeyboardMarkup:
     # Явная разметка клавиатуры (без билдера), чтобы гарантированно рисовались все строки.
@@ -9217,8 +9765,8 @@ async def adm_export(c: CallbackQuery):
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                         "⏳ Экспортирую отчеты в Google Sheets...",
                         reply_markup=None)
-    
-    # Выполняем экспорт в отдельном потоке, чтобы не блокировать бота
+
+
     try:
         async with _export_lock:
             count1, msg1 = await asyncio.to_thread(export_reports_to_sheets)
@@ -9260,6 +9808,353 @@ async def any_text(message: Message):
         return
     u = get_user(message.from_user.id)
     await show_main_menu(message.chat.id, message.from_user.id, u, "Меню")
+
+
+def _sum_hours_for_user_range(user_id: int, start: date, end: date) -> int:
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute(
+            "SELECT COALESCE(SUM(hours), 0) FROM reports WHERE user_id=? AND work_date BETWEEN ? AND ?",
+            (user_id, start.isoformat(), end.isoformat()),
+        ).fetchone()
+        return int((r[0] or 0) if r else 0)
+
+
+def _sum_hours_for_all_range(start: date, end: date) -> int:
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute(
+            "SELECT COALESCE(SUM(hours), 0) FROM reports WHERE work_date BETWEEN ? AND ?",
+            (start.isoformat(), end.isoformat()),
+        ).fetchone()
+        return int((r[0] or 0) if r else 0)
+
+
+def _webapp_actions_for_role(role: str) -> List[dict]:
+    if role == "brigadier":
+        return [
+            {"action": "brig_report", "title": "ОБ", "hint": "отчет бригадира"},
+            {"action": "otd", "title": "ОТД", "hint": "добавить часы"},
+            {"action": "stats", "title": "Статистика", "hint": "неделя / месяц"},
+            {"action": "settings", "title": "Настройки", "hint": "ФИО / телефон"},
+        ]
+    # Admin-group for Mini App: admin + it + tim
+    if role in ("admin", "it", "tim"):
+        return [
+            {"action": "otd", "title": "ОТД", "hint": "добавить часы"},
+            {"action": "stats", "title": "Статистика", "hint": "неделя / месяц"},
+            {"action": "settings", "title": "Настройки", "hint": "ФИО / телефон"},
+            {"action": "admin", "title": "Админ", "hint": "роли / экспорт"},
+        ]
+    return [
+        {"action": "otd", "title": "ОТД", "hint": "добавить часы"},
+        {"action": "stats", "title": "Статистика", "hint": "неделя / месяц"},
+        {"action": "settings", "title": "Настройки", "hint": "ФИО / телефон"},
+    ]
+
+
+def _is_miniapp_admin_role(role: str) -> bool:
+    return (role or "").strip().lower() in {"admin", "it", "tim"}
+
+
+def _verify_webapp_init_data(init_data: str) -> dict:
+    data = dict(parse_qsl(init_data, keep_blank_values=True))
+    received_hash = data.pop("hash", None)
+    if not received_hash:
+        raise ValueError("hash missing")
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items(), key=lambda kv: kv[0]))
+    secret_key = hmac.new(b"WebAppData", TOKEN.encode("utf-8"), hashlib.sha256).digest()
+    computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(computed_hash, received_hash):
+        raise ValueError("hash mismatch")
+    try:
+        auth_date = int(data.get("auth_date", "0") or "0")
+    except Exception:
+        auth_date = 0
+    if auth_date:
+        if abs(int(time.time()) - auth_date) > WEBAPP_AUTH_MAX_AGE_SEC:
+            raise ValueError("auth_date too old")
+    user_json = data.get("user")
+    if not user_json:
+        raise ValueError("user missing")
+    user = json.loads(user_json)
+    uid = int(user.get("id"))
+    return {"user_id": uid, "user": user}
+
+
+def _new_session_id() -> str:
+    # 32 bytes -> 64 hex chars
+    return os.urandom(32).hex()
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat()
+
+
+def _expires_iso(ttl_sec: int) -> str:
+    ttl = max(60, int(ttl_sec or 0))
+    return (datetime.now() + timedelta(seconds=ttl)).isoformat()
+
+
+def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def create_web_session(*, user_id: int, username: str, first_name: str, role: str) -> str:
+    sid = _new_session_id()
+    now = _now_iso()
+    exp = _expires_iso(WEBAPP_SESSION_TTL_SEC)
+    with connect() as con, closing(con.cursor()) as c:
+        c.execute(
+            """
+            INSERT INTO web_sessions(session_id, user_id, username, first_name, role, created_at, last_seen, expires_at)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (sid, int(user_id), (username or ""), (first_name or ""), (role or "user"), now, now, exp),
+        )
+        con.commit()
+    return sid
+
+
+def get_web_session(session_id: str) -> Optional[dict]:
+    sid = (session_id or "").strip()
+    if not sid:
+        return None
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute(
+            """
+            SELECT session_id, user_id, username, first_name, role, created_at, last_seen, expires_at
+            FROM web_sessions
+            WHERE session_id=?
+            """,
+            (sid,),
+        ).fetchone()
+    if not r:
+        return None
+    exp = _parse_iso_dt(r[7])
+    if exp and exp < datetime.now():
+        try:
+            with connect() as con, closing(con.cursor()) as c:
+                c.execute("DELETE FROM web_sessions WHERE session_id=?", (sid,))
+                con.commit()
+        except Exception:
+            pass
+        return None
+    return {
+        "session_id": r[0],
+        "user_id": int(r[1]),
+        "username": r[2] or "",
+        "first_name": r[3] or "",
+        "role": r[4] or "user",
+        "created_at": r[5],
+        "last_seen": r[6],
+        "expires_at": r[7],
+    }
+
+
+def touch_web_session(session_id: str) -> None:
+    sid = (session_id or "").strip()
+    if not sid:
+        return
+    now = _now_iso()
+    exp = _expires_iso(WEBAPP_SESSION_TTL_SEC)
+    try:
+        with connect() as con, closing(con.cursor()) as c:
+            c.execute(
+                "UPDATE web_sessions SET last_seen=?, expires_at=? WHERE session_id=?",
+                (now, exp, sid),
+            )
+            con.commit()
+    except Exception:
+        pass
+
+
+def _web_profile_payload(*, user_id: int, u: dict, role: str, first_name: str = "") -> dict:
+    return {
+        "user_id": int(user_id),
+        "username": (u.get("username") or "").strip(),
+        "first_name": (first_name or "").strip(),
+        "full_name": (u.get("full_name") or "").strip() or "—",
+        "phone": (u.get("phone") or "").strip(),
+        "role": role,
+    }
+
+
+def _apply_session_cookie(resp: web.StreamResponse, session_id: str) -> None:
+    # Cookie settings: HttpOnly to protect from JS, SameSite=Lax for Telegram WebView,
+    # Secure configurable for local HTTP dev.
+    resp.set_cookie(
+        WEBAPP_SESSION_COOKIE,
+        session_id,
+        max_age=max(60, int(WEBAPP_SESSION_TTL_SEC or 0)),
+        httponly=True,
+        secure=bool(WEBAPP_COOKIE_SECURE),
+        samesite="Lax",
+        path="/",
+    )
+
+
+async def _api_auth_telegram(request: web.Request) -> web.StreamResponse:
+    """Authenticate Telegram Mini App via initData and create server-side session (no JWT)."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or ""
+    if not init_data:
+        return web.json_response({"error": "initData missing"}, status=401)
+
+    try:
+        v = _verify_webapp_init_data(init_data)
+        user = v.get("user") or {}
+        user_id = int(v["user_id"])
+        username = str(user.get("username") or "")
+        first_name = str(user.get("first_name") or "")
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=401)
+
+    init_db()
+
+    # create-or-fetch
+    u = get_user(user_id)
+    if not u:
+        upsert_user(user_id, None, TZ, username)
+        u = get_user(user_id) or {}
+    else:
+        # обновим username, если он поменялся (full_name не трогаем)
+        try:
+            if username and (u.get("username") or "") != username:
+                upsert_user(user_id, None, (u.get("tz") or TZ), username)
+                u = get_user(user_id) or u
+        except Exception:
+            pass
+
+    role = get_role_label(user_id)
+    sid = create_web_session(user_id=user_id, username=username, first_name=first_name, role=role)
+
+    resp = web.json_response(
+        {
+            "profile": _web_profile_payload(user_id=user_id, u=u, role=role, first_name=first_name),
+            "actions": _webapp_actions_for_role(role),
+            "session": {"ttl_sec": int(WEBAPP_SESSION_TTL_SEC), "cookie": WEBAPP_SESSION_COOKIE},
+        }
+    )
+    _apply_session_cookie(resp, sid)
+    return resp
+
+
+async def _webapp_redirect(_: web.Request) -> web.StreamResponse:
+    raise web.HTTPFound("/webapp/")
+
+
+async def _webapp_index(_: web.Request) -> web.StreamResponse:
+    webapp_dir = Path(__file__).resolve().parent / "webapp"
+    return web.FileResponse(path=webapp_dir / "index.html")
+
+
+async def _api_me(request: web.Request) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or ""
+
+    # Auth order:
+    # 1) initData (preferred)
+    # 2) session cookie (no JWT)
+    try:
+        user_id: Optional[int] = None
+        username: str = ""
+        first_name: str = ""
+
+        if init_data:
+            v = _verify_webapp_init_data(init_data)
+            user_id = int(v["user_id"])
+            username = str((v.get("user") or {}).get("username") or "")
+            first_name = str((v.get("user") or {}).get("first_name") or "")
+        else:
+            sid = request.cookies.get(WEBAPP_SESSION_COOKIE, "")
+            s = get_web_session(sid)
+            if s:
+                user_id = int(s["user_id"])
+                username = str(s.get("username") or "")
+                first_name = str(s.get("first_name") or "")
+                touch_web_session(sid)
+            elif WEBAPP_DEV_USER_ID is not None:
+                user_id = int(WEBAPP_DEV_USER_ID)
+
+        if user_id is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=401)
+
+    init_db()
+    u = get_user(user_id)
+    if not u:
+        upsert_user(user_id, None, TZ, username)
+        u = get_user(user_id) or {}
+
+    role = get_role_label(user_id)
+
+    w_start, w_end = _stats_period_range("week")
+    m_start, m_end = _stats_period_range("month")
+
+    if role == "admin":
+        w_total = _sum_hours_for_all_range(w_start, w_end)
+        m_total = _sum_hours_for_all_range(m_start, m_end)
+    else:
+        w_total = _sum_hours_for_user_range(user_id, w_start, w_end)
+        m_total = _sum_hours_for_user_range(user_id, m_start, m_end)
+
+    return web.json_response(
+        {
+            "profile": _web_profile_payload(user_id=user_id, u=u, role=role, first_name=first_name),
+            "stats": {
+                "week": {"start": w_start.isoformat(), "end": w_end.isoformat(), "total_hours": w_total},
+                "month": {"start": m_start.isoformat(), "end": m_end.isoformat(), "total_hours": m_total},
+            },
+            "actions": _webapp_actions_for_role(role),
+        }
+    )
+
+
+async def _start_webapp_server() -> Optional[web.AppRunner]:
+    webapp_dir = Path(__file__).resolve().parent / "webapp"
+    if not webapp_dir.exists():
+        return None
+    app = web.Application()
+    app.router.add_get("/", _webapp_redirect)
+    app.router.add_get("/webapp", _webapp_redirect)
+    app.router.add_get("/webapp/", _webapp_index)
+    app.router.add_post("/api/auth/telegram", _api_auth_telegram)
+    # New Mini App HTTP API (controllers)
+    app.router.add_get("/api/me", api_get_me)
+    app.router.add_get("/api/menu", api_get_menu)
+    app.router.add_get("/api/dictionaries", api_get_dictionaries)
+    app.router.add_get("/api/machine/items", api_get_machine_items)
+    app.router.add_post("/api/report", api_post_report)
+    app.router.add_get("/api/stats", api_get_stats)
+    app.router.add_post("/api/profile/name", api_post_profile_name)
+    app.router.add_post("/api/brig/ob", api_post_brig_ob)
+
+    # Admin-only
+    app.router.add_get("/api/admin/roles", api_admin_roles_get)
+    app.router.add_post("/api/admin/roles", api_admin_roles_post)
+    app.router.add_delete("/api/admin/roles/{user_id}", api_admin_roles_delete)
+    app.router.add_post("/api/admin/export", api_admin_export_post)
+
+    # Backward compatibility (webapp v0)
+    app.router.add_post("/api/me", _api_me)
+    app.router.add_static("/webapp/", path=str(webapp_dir), show_index=False)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, WEBAPP_HOST, int(WEBAPP_PORT))
+    await site.start()
+    return runner
+
 
 # -----------------------------
 # main() и запуск (v3 Dispatcher/Router)
@@ -9366,6 +10261,12 @@ async def main():
     dp.include_router(router_topics)  # Роутер модерации тем (должен быть первым)
     dp.include_router(router)
 
+    web_runner: Optional[web.AppRunner] = None
+    try:
+        web_runner = await _start_webapp_server()
+    except Exception as e:
+        logging.error(f"[webapp] failed to start: {e}")
+
     try:
         await bot.set_my_commands([
             BotCommand(command="start", description="Запуск"),
@@ -9448,6 +10349,11 @@ async def main():
     finally:
         if scheduler:
             scheduler.shutdown()
+        if web_runner:
+            try:
+                await web_runner.cleanup()
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -1,0 +1,370 @@
+/* mobile-first placeholder (no design yet) */
+:root {
+  color-scheme: light dark;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  background: #000;
+}
+
+#root {
+  height: 100%;
+}
+
+.appShell {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- Pixel UI overlay (Stardew-inspired) ---------- */
+
+:root {
+  --px-panel-fill: rgba(18, 18, 22, 0.62);
+  --px-text: rgba(255, 255, 255, 0.92);
+  --px-muted: rgba(255, 255, 255, 0.72);
+  --px-shadow: rgba(0, 0, 0, 0.35);
+  --px-accent: rgba(255, 235, 120, 0.95);
+  --px-stroke: rgba(0, 0, 0, 0.6);
+}
+
+.pxUI {
+  position: relative;
+  z-index: 2;
+}
+
+.pxScreen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pxScreen::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  background: radial-gradient(ellipse at top, rgba(0,0,0,0.25), rgba(0,0,0,0.65));
+  pointer-events: none;
+}
+
+.pxPixelated,
+.pxPanel,
+.pxButton,
+.pxIcon,
+.pxAvatar {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/* Pixel border as SVG (9-slice via border-image). */
+/* 16x16 sprite-like frame with dark outline and inner highlight. */
+.pxPanel {
+  color: var(--px-text);
+  background: var(--px-panel-fill);
+  border: 10px solid transparent;
+  border-image-source: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' shape-rendering='crispEdges'%3E%3Crect width='16' height='16' fill='none'/%3E%3Crect x='0' y='0' width='16' height='1' fill='%23000000'/%3E%3Crect x='0' y='15' width='16' height='1' fill='%23000000'/%3E%3Crect x='0' y='0' width='1' height='16' fill='%23000000'/%3E%3Crect x='15' y='0' width='1' height='16' fill='%23000000'/%3E%3Crect x='1' y='1' width='14' height='1' fill='%23caa96b' opacity='0.85'/%3E%3Crect x='1' y='1' width='1' height='14' fill='%23caa96b' opacity='0.85'/%3E%3Crect x='1' y='14' width='14' height='1' fill='%236f4f2a' opacity='0.9'/%3E%3Crect x='14' y='1' width='1' height='14' fill='%236f4f2a' opacity='0.9'/%3E%3Crect x='2' y='2' width='12' height='12' fill='%23ffffff' opacity='0.05'/%3E%3C/svg%3E");
+  border-image-slice: 4;
+  border-image-width: 10px;
+  border-image-repeat: stretch;
+
+  border-radius: 0; /* keep pixel feel */
+  box-shadow: 0 6px 18px var(--px-shadow);
+}
+
+/* More transparent panel for "frame over live background" effect */
+.pxPanel--glass {
+  background: rgba(18, 18, 22, 0.42);
+}
+
+/* Steel / beams frame */
+.pxPanel--steel {
+  border-image-source: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' shape-rendering='crispEdges'%3E%3Crect width='16' height='16' fill='none'/%3E%3Crect x='0' y='0' width='16' height='1' fill='%23000000'/%3E%3Crect x='0' y='15' width='16' height='1' fill='%23000000'/%3E%3Crect x='0' y='0' width='1' height='16' fill='%23000000'/%3E%3Crect x='15' y='0' width='1' height='16' fill='%23000000'/%3E%3Crect x='1' y='1' width='14' height='1' fill='%23b9c4cf'/%3E%3Crect x='1' y='1' width='1' height='14' fill='%23b9c4cf'/%3E%3Crect x='1' y='14' width='14' height='1' fill='%235c6a79'/%3E%3Crect x='14' y='1' width='1' height='14' fill='%235c6a79'/%3E%3Crect x='2' y='2' width='12' height='12' fill='%23ffffff' opacity='0.04'/%3E%3Crect x='4' y='1' width='1' height='1' fill='%238a98a8'/%3E%3Crect x='11' y='1' width='1' height='1' fill='%238a98a8'/%3E%3Crect x='1' y='4' width='1' height='1' fill='%238a98a8'/%3E%3Crect x='14' y='11' width='1' height='1' fill='%238a98a8'/%3E%3C/svg%3E");
+}
+
+/* Farm / plants frame (sunflower-ish) */
+.pxPanel--farm {
+  border-image-source: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' shape-rendering='crispEdges'%3E%3Crect width='16' height='16' fill='none'/%3E%3Crect x='0' y='0' width='16' height='1' fill='%23000000'/%3E%3Crect x='0' y='15' width='16' height='1' fill='%23000000'/%3E%3Crect x='0' y='0' width='1' height='16' fill='%23000000'/%3E%3Crect x='15' y='0' width='1' height='16' fill='%23000000'/%3E%3Crect x='1' y='1' width='14' height='1' fill='%23ffdc6a'/%3E%3Crect x='1' y='1' width='1' height='14' fill='%23ffdc6a'/%3E%3Crect x='1' y='14' width='14' height='1' fill='%237a5a2a'/%3E%3Crect x='14' y='1' width='1' height='14' fill='%237a5a2a'/%3E%3Crect x='2' y='2' width='12' height='12' fill='%23ffffff' opacity='0.04'/%3E%3Crect x='3' y='1' width='1' height='1' fill='%2341a84c'/%3E%3Crect x='12' y='1' width='1' height='1' fill='%2341a84c'/%3E%3Crect x='1' y='3' width='1' height='1' fill='%2341a84c'/%3E%3Crect x='14' y='12' width='1' height='1' fill='%2341a84c'/%3E%3C/svg%3E");
+}
+
+.pxMainMenuFrame {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pxDivider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.10);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.45);
+}
+
+.pxPanel__title {
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  text-shadow: 0 1px 0 var(--px-stroke);
+  margin-bottom: 8px;
+}
+
+.pxPanel__body {
+  font-size: 14px;
+}
+
+.pxHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pxHeader__left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.pxAvatar {
+  width: 40px;
+  height: 40px;
+  border: 6px solid transparent;
+  border-image-source: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' shape-rendering='crispEdges'%3E%3Crect width='16' height='16' fill='%232a3b55'/%3E%3Crect x='0' y='0' width='16' height='1' fill='%23000000'/%3E%3Crect x='0' y='15' width='16' height='1' fill='%23000000'/%3E%3Crect x='0' y='0' width='1' height='16' fill='%23000000'/%3E%3Crect x='15' y='0' width='1' height='16' fill='%23000000'/%3E%3Crect x='1' y='1' width='14' height='14' fill='%23ffffff' opacity='0.06'/%3E%3C/svg%3E");
+  border-image-slice: 4;
+  border-image-width: 6px;
+  border-image-repeat: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pxAvatar__inner {
+  font-weight: 900;
+  color: rgba(255, 255, 255, 0.92);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.65);
+}
+
+.pxHeader__meta {
+  min-width: 0;
+}
+
+.pxHeader__name {
+  font-weight: 800;
+  font-size: 14px;
+  line-height: 1.1;
+  text-shadow: 0 1px 0 var(--px-stroke);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.pxHeader__role {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--px-muted);
+}
+
+.pxBalance {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+.pxBalance__value {
+  font-weight: 900;
+  color: var(--px-accent);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.65);
+}
+
+.pxIcon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.pxIcon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.pxButton {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 26px 1fr 18px;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+
+  color: var(--px-text);
+  background: rgba(0, 0, 0, 0.18);
+  border: 8px solid transparent;
+  border-image-source: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' shape-rendering='crispEdges'%3E%3Crect width='16' height='16' fill='none'/%3E%3Crect x='0' y='0' width='16' height='1' fill='%23000000'/%3E%3Crect x='0' y='15' width='16' height='1' fill='%23000000'/%3E%3Crect x='0' y='0' width='1' height='16' fill='%23000000'/%3E%3Crect x='15' y='0' width='1' height='16' fill='%23000000'/%3E%3Crect x='1' y='1' width='14' height='14' fill='%23ffffff' opacity='0.06'/%3E%3C/svg%3E");
+  border-image-slice: 4;
+  border-image-width: 8px;
+  border-image-repeat: stretch;
+
+  text-align: left;
+}
+
+.pxButton:disabled {
+  opacity: 0.55;
+}
+
+.pxButton__left {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.pxButton__text {
+  min-width: 0;
+}
+
+.pxButton__title {
+  font-weight: 850;
+  letter-spacing: 0.15px;
+  text-shadow: 0 1px 0 var(--px-stroke);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pxButton__subtitle {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--px-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pxButton__right {
+  text-align: right;
+  color: rgba(255, 255, 255, 0.70);
+}
+
+.pxButtonList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pxForm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pxField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pxLabel {
+  font-size: 12px;
+  color: var(--px-muted);
+}
+
+.pxInput {
+  width: 100%;
+  padding: 10px 12px;
+  color: var(--px-text);
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  outline: none;
+  border-radius: 0;
+}
+
+.pxRow {
+  display: flex;
+  gap: 10px;
+}
+
+.pxRow > * {
+  flex: 1;
+}
+
+.pxHint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.pxPills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pxPill {
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--px-text);
+  border-radius: 0;
+}
+
+.pxPill--active {
+  border-color: rgba(255, 235, 120, 0.55);
+  box-shadow: 0 0 0 1px rgba(255, 235, 120, 0.25) inset;
+}
+
+.pxStepbar {
+  display: flex;
+  gap: 6px;
+}
+
+.pxStepDot {
+  width: 10px;
+  height: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.pxStepDot--active {
+  background: rgba(255, 235, 120, 0.65);
+}
+
+.container {
+  width: min(420px, 100%);
+  margin: 0 auto;
+  padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
+}
+
+.card {
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.button {
+  width: 100%;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(0,0,0,0.12);
+  background: transparent;
+}
