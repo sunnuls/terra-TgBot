@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Terra — панель</title>
-  <link rel="stylesheet" href="./app.css?v=10" />
+  <link rel="stylesheet" href="./app.css?v=12" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
@@ -71,10 +71,12 @@
             <div class="inputWrap">
               <input id="otdDate" type="date" class="inputInner" />
             </div>
+            <div class="fieldError" id="otdDateError" hidden></div>
           </label>
           <label>
             <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Часы</div>
-            <input id="otdHours" type="number" min="1" max="24" step="1" placeholder="8" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+            <input id="otdHours" type="number" min="1" max="24" step="1" placeholder="—" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+            <div class="fieldError" id="otdHoursError" hidden></div>
           </label>
           <label>
             <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Тип работы</div>
@@ -83,6 +85,7 @@
               <option value="tech">Техника</option>
               <option value="hand">Ручная</option>
             </select>
+            <div class="fieldError" id="otdWorkTypeError" hidden></div>
           </label>
 
           <label id="otdMachineKindWrap" hidden>
@@ -95,19 +98,40 @@
             <select id="otdMachineName" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
           </label>
 
+          <label id="otdMachineOtherWrap" hidden>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Уточните технику</div>
+            <input id="otdMachineOther" type="text" placeholder="Введите текст" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+            <div class="fieldError" id="otdMachineOtherError" hidden></div>
+          </label>
+
           <label>
             <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Вид работы</div>
             <select id="otdActivity" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
+            <div class="fieldError" id="otdActivityError" hidden></div>
+          </label>
+
+          <label id="otdActivityOtherWrap" hidden>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Уточните вид работы</div>
+            <input id="otdActivityOther" type="text" placeholder="Введите текст" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+            <div class="fieldError" id="otdActivityOtherError" hidden></div>
           </label>
 
           <label>
             <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Локация / поле</div>
             <select id="otdLocation" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
+            <div class="fieldError" id="otdLocationError" hidden></div>
+          </label>
+
+          <label id="otdLocationOtherWrap" hidden>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Уточните локацию</div>
+            <input id="otdLocationOther" type="text" placeholder="Введите текст" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+            <div class="fieldError" id="otdLocationOtherError" hidden></div>
           </label>
 
           <label>
             <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Культура</div>
             <select id="otdCrop" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
+            <div class="fieldError" id="otdCropError" hidden></div>
           </label>
 
           <label id="otdTripsWrap" hidden>
@@ -120,6 +144,135 @@
         </div>
       </section>
 
+      <section class="card" id="screenAdmin" hidden>
+        <div class="sectionTitle">Админ</div>
+        <div style="display:flex; flex-direction:column; gap:10px">
+          <div class="adminTabsRow">
+            <button class="btn" id="adminTabRoles" type="button">Роли</button>
+            <button class="btn btn--secondary" id="adminTabLocs" type="button">Локации</button>
+            <button class="btn btn--secondary" id="adminTabCrops" type="button">Культуры</button>
+            <button class="btn btn--secondary" id="adminTabActs" type="button">Работы</button>
+            <button class="btn btn--secondary" id="adminTabMachines" type="button">Техника</button>
+          </div>
+
+          <div id="adminSectionRoles">
+          <div style="display:grid; grid-template-columns:1fr; gap:10px">
+            <select id="adminRole" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)">
+              <option value="">Роль</option>
+              <option value="it">IT</option>
+              <option value="tim">TIM</option>
+              <option value="brigadier">Бригадир</option>
+            </select>
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px">
+            <input id="adminUsername" type="text" placeholder="@username" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+            <select id="adminUserPick" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)">
+              <option value="">Выберите сотрудника</option>
+            </select>
+          </div>
+          <button class="btn" id="adminAddRole" type="button">Добавить / обновить роль</button>
+          <button class="btn btn--secondary" id="adminExport" type="button">Запустить экспорт</button>
+          <div id="adminResult" style="font-size:13px; color:var(--muted)"></div>
+          <div class="sectionTitle" style="margin-top:6px">Роли</div>
+          <div id="adminRolesList"></div>
+          </div>
+
+          <div id="adminSectionLocs" hidden>
+            <div class="sectionTitle" style="margin-top:2px">Локации</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px">
+              <button class="btn" id="adminLocsTabFields" type="button">Поля</button>
+              <button class="btn btn--secondary" id="adminLocsTabWare" type="button">Склад</button>
+            </div>
+
+            <div id="adminSectionFields" style="margin-top:10px">
+              <div style="display:grid; grid-template-columns:1fr; gap:10px">
+                <div style="display:grid; grid-template-columns:1fr auto; gap:10px">
+                  <input id="adminFieldsNew" type="text" placeholder="Новое поле" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+                  <div style="display:grid; grid-template-columns:auto auto; gap:8px">
+                    <button class="btn" id="adminFieldsAdd" type="button">Добавить</button>
+                    <button class="btn btn--secondary btn--icon" id="adminFieldsSort" type="button" aria-label="Сортировка" title="Сортировка">↕️</button>
+                  </div>
+                </div>
+                <div id="adminFieldsResult" style="font-size:13px; color:var(--muted)"></div>
+                <div id="adminFieldsList"></div>
+              </div>
+            </div>
+
+            <div id="adminSectionWare" hidden style="margin-top:10px">
+              <div style="display:grid; grid-template-columns:1fr; gap:10px">
+                <div style="display:grid; grid-template-columns:1fr auto; gap:10px">
+                  <input id="adminWareNew" type="text" placeholder="Новое место" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+                  <div style="display:grid; grid-template-columns:auto auto; gap:8px">
+                    <button class="btn" id="adminWareAdd" type="button">Добавить</button>
+                    <button class="btn btn--secondary btn--icon" id="adminWareSort" type="button" aria-label="Сортировка" title="Сортировка">↕️</button>
+                  </div>
+                </div>
+                <div id="adminWareResult" style="font-size:13px; color:var(--muted)"></div>
+                <div id="adminWareList"></div>
+              </div>
+            </div>
+          </div>
+
+          <div id="adminSectionCrops" hidden>
+            <div class="sectionTitle" style="margin-top:2px">Культуры</div>
+            <div style="display:grid; grid-template-columns:1fr; gap:10px">
+              <div style="display:grid; grid-template-columns:1fr auto; gap:10px">
+                <input id="adminCropsNew" type="text" placeholder="Новая культура" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+                <div style="display:grid; grid-template-columns:auto auto; gap:8px">
+                  <button class="btn" id="adminCropsAdd" type="button">Добавить</button>
+                  <button class="btn btn--secondary btn--icon" id="adminCropsSort" type="button" aria-label="Сортировка" title="Сортировка">↕️</button>
+                </div>
+              </div>
+              <div id="adminCropsResult" style="font-size:13px; color:var(--muted)"></div>
+              <div id="adminCropsList"></div>
+            </div>
+          </div>
+
+          <div id="adminSectionActs" hidden>
+            <div class="sectionTitle" style="margin-top:2px">Работы</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px">
+              <button class="btn" id="adminActsTabTech" type="button">Техника</button>
+              <button class="btn btn--secondary" id="adminActsTabHand" type="button">Ручная</button>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr; gap:10px; margin-top:10px">
+              <div style="display:grid; grid-template-columns:1fr auto; gap:10px">
+                <input id="adminActsNew" type="text" placeholder="Новая работа" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+                <div style="display:grid; grid-template-columns:auto auto; gap:8px">
+                  <button class="btn" id="adminActsAdd" type="button">Добавить</button>
+                  <button class="btn btn--secondary btn--icon" id="adminActsSort" type="button" aria-label="Сортировка" title="Сортировка">↕️</button>
+                </div>
+              </div>
+              <div id="adminActsResult" style="font-size:13px; color:var(--muted)"></div>
+              <div id="adminActsList"></div>
+            </div>
+          </div>
+
+          <div id="adminSectionMachines" hidden>
+            <div class="sectionTitle" style="margin-top:2px">Техника</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px">
+              <button class="btn" id="adminMachinesTabKinds" type="button">Типы</button>
+              <button class="btn btn--secondary" id="adminMachinesTabItems" type="button">Единицы</button>
+            </div>
+            <div style="margin-top:10px">
+              <div style="display:flex; align-items:center; gap:10px">
+                <select id="adminMachineKindPick" style="flex:1; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)">
+                  <option value="">Выберите тип техники</option>
+                </select>
+              </div>
+              <div style="display:grid; grid-template-columns:1fr auto; gap:10px">
+                <input id="adminMachinesNew" type="text" placeholder="Новое значение" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+                <div style="display:grid; grid-template-columns:auto auto; gap:8px">
+                  <button class="btn" id="adminMachinesAdd" type="button">Добавить</button>
+                  <button class="btn btn--secondary btn--icon" id="adminMachinesSort" type="button" aria-label="Сортировка" title="Сортировка">↕️</button>
+                </div>
+              </div>
+              <div id="adminMachinesResult" style="font-size:13px; color:var(--muted)"></div>
+              <div id="adminMachinesList"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="card" id="screenStats" hidden>
         <div class="sectionTitle">Статистика</div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px">
@@ -127,12 +280,22 @@
           <button class="btn" id="statsWeek" type="button">Неделя</button>
           <button class="btn" id="statsMonth" type="button">Месяц</button>
         </div>
-        <div id="statsResult" style="margin-top:10px; font-size:13px; color:var(--muted)"></div>
+        <div id="statsResult" style="margin-top:10px"></div>
       </section>
 
       <section class="card" id="screenSettings" hidden>
         <div class="sectionTitle">Настройки</div>
         <div style="display:flex; flex-direction:column; gap:10px">
+          <div style="display:flex; align-items:center; gap:12px">
+            <div class="avatar" aria-hidden="true">
+              <div class="avatar__inner" id="settingsAvatarPreview">T</div>
+            </div>
+            <div style="flex:1">
+              <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Аватар</div>
+              <input id="settingsAvatarFile" type="file" accept="image/*" hidden />
+              <button class="btn btn--secondary" id="settingsAvatarPick" type="button">Выбрать фото</button>
+            </div>
+          </div>
           <label>
             <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Фамилия Имя</div>
             <input id="settingsFullName" type="text" placeholder="Иванов Иван" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
@@ -140,6 +303,23 @@
           <button class="btn" id="settingsSave" type="button">Сохранить</button>
           <div id="settingsResult" style="font-size:13px; color:var(--muted)"></div>
         </div>
+      </section>
+
+      <section class="card" id="screenAvatarCrop" hidden>
+        <div class="sectionTitle">Аватар</div>
+        <div class="cropWrap" id="avatarCropWrap">
+          <canvas class="cropCanvas" id="avatarCropCanvas" aria-label="Предпросмотр"></canvas>
+          <div class="cropFrame" aria-hidden="true"></div>
+        </div>
+        <div style="margin-top:10px">
+          <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Масштаб</div>
+          <input id="avatarCropZoom" type="range" min="1" max="3" step="0.01" value="1" style="width:100%" />
+        </div>
+        <div style="margin-top:12px; display:grid; grid-template-columns:1fr 1fr; gap:10px">
+          <button class="btn btn--secondary" id="avatarCropCancel" type="button">Отмена</button>
+          <button class="btn" id="avatarCropSave" type="button">Сохранить</button>
+        </div>
+        <div id="avatarCropResult" style="font-size:13px; color:var(--muted); margin-top:8px"></div>
       </section>
 
       <section class="card" id="screenBrig" hidden>
@@ -150,14 +330,17 @@
             <div class="inputWrap">
               <input id="brigDate" type="date" class="inputInner" />
             </div>
+            <div class="fieldError" id="brigDateError" hidden></div>
           </label>
           <label>
             <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Культура</div>
             <select id="brigCrop" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
+            <div class="fieldError" id="brigCropError" hidden></div>
           </label>
           <label>
             <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Поле</div>
             <select id="brigField" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)"></select>
+            <div class="fieldError" id="brigFieldError" hidden></div>
           </label>
           <label>
             <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Рядов</div>
@@ -195,6 +378,12 @@
           <input id="weatherLocName" type="text" placeholder="Поле №7" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
         </label>
 
+        <label style="margin-top:10px">
+          <div style="font-size:12px; color:var(--muted); margin-bottom:6px">Поиск на карте</div>
+          <input id="weatherLocSearch" type="text" placeholder="Город / село / улица" style="width:100%; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text)" />
+        </label>
+        <div id="weatherLocSearchResults" style="margin-top:8px"></div>
+
         <div class="mapWrap" id="weatherMapWrap">
           <div class="map" id="weatherMap"></div>
         </div>
@@ -227,6 +416,11 @@
         <button class="btn btn--secondary" id="weatherLocDelete" type="button" style="margin-top:10px">Удалить локацию</button>
       </section>
 
+      <section class="card" id="screenReportView" hidden>
+        <div class="sectionTitle">Запись</div>
+        <div id="reportViewBody" style="margin-top:10px"></div>
+      </section>
+
       <section class="card muted" id="errorBox" hidden>
         <div class="errorTitle">Не удалось загрузить данные</div>
         <div class="errorText" id="errorText"></div>
@@ -235,10 +429,11 @@
 
     <footer class="footer">
       <button class="btn btn--secondary" id="backBtn" type="button" hidden>Назад</button>
-      <button class="btn btn--secondary" id="closeBtn" type="button">Закрыть</button>
     </footer>
   </div>
 
-  <script src="./app.js?v=10"></script>
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="./app.js?v=11"></script>
 </body>
 </html>

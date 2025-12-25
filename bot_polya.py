@@ -242,14 +242,20 @@ def svc_menu(*, role: str) -> dict:
 
 def svc_dictionaries() -> dict:
     # Optimized for mobile: single payload to build pickers.
+    tech_acts = list_activities(GROUP_TECH)
+    hand_acts = list_activities(GROUP_HAND)
+    if "Прочее" not in tech_acts:
+        tech_acts = [*tech_acts, "Прочее"]
+    if "Прочее" not in hand_acts:
+        hand_acts = [*hand_acts, "Прочее"]
     return {
         "groups": {
             "activity": {"tech": GROUP_TECH, "hand": GROUP_HAND},
             "location": {"fields": GROUP_FIELDS, "ware": GROUP_WARE},
         },
         "activities": {
-            "tech": list_activities(GROUP_TECH),
-            "hand": list_activities(GROUP_HAND),
+            "tech": tech_acts,
+            "hand": hand_acts,
         },
         "locations": {
             "fields": list_locations(GROUP_FIELDS),
@@ -258,18 +264,47 @@ def svc_dictionaries() -> dict:
         "crops": list_crops(),
         "machine_kinds": list_machine_kinds(limit=50, offset=0),
         "otd": {
-            "tractor_works": list(OTD_TRACTOR_WORKS),
-            "hand_works": list(OTD_HAND_WORKS),
-            "fields": list(OTD_FIELDS),
-            "crops": list(OTD_CROPS),
+            "tractor_works": tech_acts,
+            "hand_works": hand_acts,
+            "fields": list_locations(GROUP_FIELDS),
+            "crops": list_crops(),
             "kamaz_cargo": list(KAMAZ_CARGO_LIST),
         },
         "brig": {
             # For OB v2 in Mini App
-            "crops": list(CROPS_LIST),
-            "fields": list(FIELD_LOCATIONS),
+            "crops": list_crops(),
+            "fields": list_locations(GROUP_FIELDS),
         },
     }
+
+
+def _activities_with_other(grp: str) -> List[str]:
+    items = list_activities(grp)
+    if "Прочее" not in items:
+        items = [*items, "Прочее"]
+    return items
+
+
+def _crops_with_other() -> List[str]:
+    items = list_crops()
+    if "Прочее" not in items:
+        items = [*items, "Прочее"]
+    return items
+
+
+def _activities_no_other(grp: str) -> List[str]:
+    # for flows where "Прочее" is represented as a separate free-text option
+    return [a for a in (list_activities(grp) or []) if (a or "").strip() != "Прочее"]
+
+
+def _kamaz_cargo_list() -> List[str]:
+    # KamAZ cargo is crop-like, but includes "Навоз" historically.
+    items = list_crops()
+    if "Навоз" not in items:
+        items = [*items, "Навоз"]
+    if "Прочее" not in items:
+        items = [*items, "Прочее"]
+    return items
 
 
 def _as_int(value, default: int = 0) -> int:
@@ -380,6 +415,94 @@ def svc_stats(*, ctx: dict, period: str) -> dict:
     }
 
 
+def _month_range(ym: str) -> Tuple[date, date]:
+    """ym = YYYY-MM"""
+    ym = (ym or "").strip()
+    if not ym or len(ym) < 7:
+        start, end = _stats_period_range("month")
+        return start, end
+    y = int(ym.split("-")[0])
+    m = int(ym.split("-")[1])
+    start = date(y, m, 1)
+    if m == 12:
+        end = date(y + 1, 1, 1) - timedelta(days=1)
+    else:
+        end = date(y, m + 1, 1) - timedelta(days=1)
+    return start, end
+
+
+def svc_reports_list(*, ctx: dict, start: date, end: date) -> List[dict]:
+    role = str(ctx.get("role") or "user")
+    user_id = int(ctx["user_id"])
+    start_s = start.isoformat()
+    end_s = end.isoformat()
+    with connect() as con, closing(con.cursor()) as c:
+        if role == "admin":
+            rows = c.execute(
+                """
+                SELECT id, work_date, activity, location, hours, created_at, machine_type, machine_name, crop, trips
+                FROM reports
+                WHERE work_date>=? AND work_date<=?
+                ORDER BY work_date DESC, created_at DESC
+                """,
+                (start_s, end_s),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                """
+                SELECT id, work_date, activity, location, hours, created_at, machine_type, machine_name, crop, trips
+                FROM reports
+                WHERE user_id=? AND work_date>=? AND work_date<=?
+                ORDER BY work_date DESC, created_at DESC
+                """,
+                (user_id, start_s, end_s),
+            ).fetchall()
+    out: List[dict] = []
+    for r in rows or []:
+        out.append(
+            {
+                "id": r[0],
+                "work_date": r[1],
+                "activity": r[2],
+                "location": r[3],
+                "hours": r[4],
+                "created_at": r[5],
+                "machine_type": r[6],
+                "machine_name": r[7],
+                "crop": r[8],
+                "trips": r[9],
+            }
+        )
+    return out
+
+
+def svc_reports_months(*, ctx: dict) -> List[dict]:
+    role = str(ctx.get("role") or "user")
+    user_id = int(ctx["user_id"])
+    with connect() as con, closing(con.cursor()) as c:
+        if role == "admin":
+            rows = c.execute(
+                """
+                SELECT substr(work_date, 1, 7) AS ym, SUM(hours) AS total
+                FROM reports
+                GROUP BY ym
+                ORDER BY ym DESC
+                """
+            ).fetchall()
+        else:
+            rows = c.execute(
+                """
+                SELECT substr(work_date, 1, 7) AS ym, SUM(hours) AS total
+                FROM reports
+                WHERE user_id=?
+                GROUP BY ym
+                ORDER BY ym DESC
+                """,
+                (user_id,),
+            ).fetchall()
+    return [{"month": r[0], "total_hours": int(r[1] or 0)} for r in rows or [] if r and r[0]]
+
+
 # -----------------------------
 # Web API controllers (aiohttp handlers)
 # -----------------------------
@@ -430,6 +553,49 @@ async def api_post_report(request: web.Request) -> web.StreamResponse:
     except Exception:
         pass
     return web.json_response({"ok": True, "report": report}, status=201)
+
+
+async def api_get_reports(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    period = str(request.query.get("period") or "week").strip().lower()
+    month = str(request.query.get("month") or "").strip()
+    if period == "month" and month:
+        start, end = _month_range(month)
+    else:
+        start, end = _stats_period_range(period if period in ("today", "week", "month") else "week")
+    items = svc_reports_list(ctx=ctx, start=start, end=end)
+    return web.json_response({"ok": True, "period": period, "range": {"start": start.isoformat(), "end": end.isoformat()}, "items": items})
+
+
+async def api_get_reports_months(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    items = svc_reports_months(ctx=ctx)
+    return web.json_response({"ok": True, "items": items})
+
+
+async def api_get_report_one(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    role = str(ctx.get("role") or "user")
+    user_id = int(ctx["user_id"])
+    try:
+        rid = int(request.match_info.get("report_id") or "0")
+    except Exception:
+        rid = 0
+    report = get_report(rid) if rid else None
+    if not report:
+        return web.json_response({"error": "not found"}, status=404)
+    if role != "admin" and int(report.get("user_id") or 0) != user_id:
+        return web.json_response({"error": "forbidden"}, status=403)
+    return web.json_response({"ok": True, "report": report})
 
 
 async def api_get_stats(request: web.Request) -> web.StreamResponse:
@@ -541,9 +707,790 @@ async def api_admin_roles_get(request: web.Request) -> web.StreamResponse:
     if denied:
         return denied
     with connect() as con, closing(con.cursor()) as c:
-        rows = c.execute("SELECT user_id, role, added_by, added_at FROM user_roles ORDER BY role, user_id").fetchall()
-    items = [{"user_id": int(r[0]), "role": r[1], "added_by": int(r[2]) if r[2] is not None else None, "added_at": r[3]} for r in rows]
+        rows = c.execute(
+            """
+            SELECT ur.user_id, ur.role, ur.added_by, ur.added_at, u.username, u.full_name
+            FROM user_roles ur
+            LEFT JOIN users u ON u.user_id = ur.user_id
+            ORDER BY ur.role, ur.user_id
+            """
+        ).fetchall()
+    items = [
+        {
+            "user_id": int(r[0]),
+            "role": r[1],
+            "added_by": int(r[2]) if r[2] is not None else None,
+            "added_at": r[3],
+            "username": r[4],
+            "full_name": r[5],
+        }
+        for r in rows
+    ]
     return web.json_response({"items": items})
+
+
+async def api_admin_fields_get(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    limit = _as_int(request.query.get("limit"), 200)
+    offset = _as_int(request.query.get("offset"), 0)
+    limit = max(1, min(500, limit))
+    offset = max(0, offset)
+    q = (request.query.get("q") or "").strip().lower()
+    with connect() as con, closing(con.cursor()) as c:
+        if q:
+            rows = c.execute(
+                """
+                SELECT id, name, grp
+                FROM locations
+                WHERE grp=? AND LOWER(name) LIKE ?
+                ORDER BY name
+                LIMIT ? OFFSET ?
+                """,
+                (GROUP_FIELDS, f"%{q}%", limit, offset),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT id, name, grp FROM locations WHERE grp=? ORDER BY name LIMIT ? OFFSET ?",
+                (GROUP_FIELDS, limit, offset),
+            ).fetchall()
+    items = [{"id": int(r[0]), "name": r[1], "grp": r[2]} for r in rows]
+    return web.json_response({"items": items})
+
+
+async def api_admin_fields_post(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    name = str((payload or {}).get("name") or "").strip()
+    if not name:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    ok = add_location(GROUP_FIELDS, name)
+    if not ok:
+        return web.json_response({"error": "already exists"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_fields_patch(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    loc_id = _as_int(request.match_info.get("loc_id"), 0)
+    new_name = str((payload or {}).get("name") or "").strip()
+    if loc_id <= 0 or not new_name:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    loc = get_location_by_id(loc_id)
+    if not loc or (loc.get("grp") != GROUP_FIELDS):
+        return web.json_response({"error": "not found"}, status=404)
+    ok = update_location_name(loc_id, new_name)
+    if not ok:
+        return web.json_response({"error": "not updated"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_fields_delete(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    loc_id = _as_int(request.match_info.get("loc_id"), 0)
+    if loc_id <= 0:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    loc = get_location_by_id(loc_id)
+    if not loc or (loc.get("grp") != GROUP_FIELDS):
+        return web.json_response({"error": "not found"}, status=404)
+    ok = delete_location_by_id(loc_id)
+    if not ok:
+        return web.json_response({"error": "not deleted"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_crops_get(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    limit = _as_int(request.query.get("limit"), 200)
+    offset = _as_int(request.query.get("offset"), 0)
+    limit = max(1, min(500, limit))
+    offset = max(0, offset)
+    q = (request.query.get("q") or "").strip().lower()
+    items = list_crops_rows(limit=limit, offset=offset)
+    if q:
+        items = [it for it in (items or []) if q in str(it.get("name") or "").lower()]
+    return web.json_response({"items": items})
+
+
+async def api_admin_crops_post(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    name = str((payload or {}).get("name") or "").strip()
+    if not name:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    ok = add_crop(name)
+    if not ok:
+        return web.json_response({"error": "already exists"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_crops_patch(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    crop_id = _as_int(request.match_info.get("crop_id"), 0)
+    new_name = str((payload or {}).get("name") or "").strip()
+    if crop_id <= 0 or not new_name:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    ok = update_crop_name(crop_id, new_name)
+    if not ok:
+        return web.json_response({"error": "not updated"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_crops_delete(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    crop_id = _as_int(request.match_info.get("crop_id"), 0)
+    if crop_id <= 0:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    ok = delete_crop_by_rowid(crop_id)
+    if not ok:
+        return web.json_response({"error": "not deleted"}, status=409)
+    return web.json_response({"ok": True})
+
+
+def _admin_act_group(grp: str) -> Optional[str]:
+    g = (grp or "").strip().lower()
+    if g == "tech":
+        return GROUP_TECH
+    if g == "hand":
+        return GROUP_HAND
+    return None
+
+
+async def api_admin_activities_get(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    grp = _admin_act_group(request.query.get("grp") or "")
+    if not grp:
+        return web.json_response({"error": "invalid grp"}, status=422)
+    limit = _as_int(request.query.get("limit"), 200)
+    offset = _as_int(request.query.get("offset"), 0)
+    limit = max(1, min(500, limit))
+    offset = max(0, offset)
+    q = (request.query.get("q") or "").strip().lower()
+    items = list_activities_rows(grp=grp, limit=limit, offset=offset)
+    if q:
+        items = [it for it in (items or []) if q in str(it.get("name") or "").lower()]
+    return web.json_response({"items": items})
+
+
+async def api_admin_activities_post(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    grp = _admin_act_group((payload or {}).get("grp") or "")
+    name = str((payload or {}).get("name") or "").strip()
+    if not grp or not name:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    ok = add_activity(grp, name)
+    if not ok:
+        return web.json_response({"error": "already exists"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_activities_patch(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    act_id = _as_int(request.match_info.get("act_id"), 0)
+    new_name = str((payload or {}).get("name") or "").strip()
+    if act_id <= 0 or not new_name:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    ok = update_activity_name(act_id, new_name)
+    if not ok:
+        return web.json_response({"error": "not updated"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_activities_delete(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    act_id = _as_int(request.match_info.get("act_id"), 0)
+    if act_id <= 0:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    before = get_activity_by_id(act_id)
+    if not before:
+        return web.json_response({"error": "not found"}, status=404)
+    ok = delete_activity_by_id(act_id)
+    if not ok:
+        return web.json_response({"error": "not deleted"}, status=409)
+    # strong verification: id must not exist anymore
+    if get_activity_by_id(act_id):
+        return web.json_response({"error": "delete verification failed"}, status=500)
+    remaining = count_activities_by_name_norm(grp=str(before.get("grp") or ""), name=str(before.get("name") or ""))
+    return web.json_response({"ok": True, "deleted_id": act_id, "remaining_same_name": remaining})
+
+
+def _admin_reorder_simple(table: str, ids: List[int], *, where_sql: str = "", where_args: tuple = ()) -> bool:
+    if not ids:
+        return False
+    clean = [int(x) for x in ids if int(x or 0) > 0]
+    if not clean:
+        return False
+    with connect() as con, closing(con.cursor()) as c:
+        placeholders = ",".join(["?"] * len(clean))
+        if where_sql:
+            rows = c.execute(
+                f"SELECT id FROM {table} WHERE {where_sql} AND id IN ({placeholders})",
+                tuple(where_args) + tuple(clean),
+            ).fetchall() or []
+        else:
+            rows = c.execute(
+                f"SELECT id FROM {table} WHERE id IN ({placeholders})",
+                tuple(clean),
+            ).fetchall() or []
+        allowed = {int(r[0]) for r in rows}
+        if not allowed:
+            return False
+        pos = 1
+        for i in clean:
+            if i not in allowed:
+                continue
+            c.execute(f"UPDATE {table} SET pos=? WHERE id=?", (pos, i))
+            pos += 1
+        con.commit()
+        return True
+
+
+def _admin_reorder_crops(rowids: List[int]) -> bool:
+    if not rowids:
+        return False
+    clean = [int(x) for x in rowids if int(x or 0) > 0]
+    if not clean:
+        return False
+    with connect() as con, closing(con.cursor()) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY, pos INTEGER)")
+        placeholders = ",".join(["?"] * len(clean))
+        rows = c.execute(
+            f"SELECT rowid FROM crops WHERE rowid IN ({placeholders})",
+            tuple(clean),
+        ).fetchall() or []
+        allowed = {int(r[0]) for r in rows}
+        if not allowed:
+            return False
+        pos = 1
+        for rid in clean:
+            if rid not in allowed:
+                continue
+            c.execute("UPDATE crops SET pos=? WHERE rowid=?", (pos, rid))
+            pos += 1
+        con.commit()
+        return True
+
+
+async def api_admin_fields_reorder(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    ids = (payload or {}).get("ids") or []
+    ok = _admin_reorder_simple("locations", [int(x) for x in ids if x], where_sql="grp=?", where_args=(GROUP_FIELDS,))
+    if not ok:
+        return web.json_response({"error": "not reordered"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_ware_reorder(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    ids = (payload or {}).get("ids") or []
+    ok = _admin_reorder_simple("locations", [int(x) for x in ids if x], where_sql="grp=?", where_args=(GROUP_WARE,))
+    if not ok:
+        return web.json_response({"error": "not reordered"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_crops_reorder(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    ids = (payload or {}).get("ids") or []
+    ok = _admin_reorder_crops([int(x) for x in ids if x])
+    if not ok:
+        return web.json_response({"error": "not reordered"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_activities_reorder(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    grp = _admin_act_group((payload or {}).get("grp") or "")
+    if not grp:
+        return web.json_response({"error": "invalid grp"}, status=422)
+    ids = (payload or {}).get("ids") or []
+    ok = _admin_reorder_simple("activities", [int(x) for x in ids if x], where_sql="grp=?", where_args=(grp,))
+    if not ok:
+        return web.json_response({"error": "not reordered"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_machine_kinds_reorder(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    ids = (payload or {}).get("ids") or []
+    ok = _admin_reorder_simple("machine_kinds", [int(x) for x in ids if x])
+    if not ok:
+        return web.json_response({"error": "not reordered"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_machine_items_reorder(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    kind_id = _as_int((payload or {}).get("kind_id"), 0)
+    ids = (payload or {}).get("ids") or []
+    if kind_id <= 0:
+        return web.json_response({"error": "invalid kind_id"}, status=422)
+    ok = _admin_reorder_simple("machine_items", [int(x) for x in ids if x], where_sql="kind_id=?", where_args=(kind_id,))
+    if not ok:
+        return web.json_response({"error": "not reordered"}, status=409)
+    return web.json_response({"ok": True})
+
+
+def update_machine_kind(kind_id: int, *, title: Optional[str] = None, mode: Optional[str] = None) -> bool:
+    title = (title or "").strip() if title is not None else None
+    mode = (mode or "").strip().lower() if mode is not None else None
+    if title is not None and not title:
+        return False
+    if mode is not None and mode not in ("list", "single"):
+        return False
+    parts: List[str] = []
+    args: List[object] = []
+    if title is not None:
+        parts.append("title=?")
+        args.append(title)
+    if mode is not None:
+        parts.append("mode=?")
+        args.append(mode)
+    if not parts:
+        return False
+    args.append(kind_id)
+    with connect() as con, closing(con.cursor()) as c:
+        try:
+            cur = c.execute(f"UPDATE machine_kinds SET {', '.join(parts)} WHERE id=?", tuple(args))
+            con.commit()
+            return cur.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+
+
+async def api_admin_machine_kinds_get(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    limit = _as_int(request.query.get("limit"), 200)
+    offset = _as_int(request.query.get("offset"), 0)
+    limit = max(1, min(500, limit))
+    offset = max(0, offset)
+    q = (request.query.get("q") or "").strip().lower()
+    items = list_machine_kinds(limit=limit, offset=offset)
+    if q:
+        items = [it for it in (items or []) if q in str(it.get("title") or "").lower()]
+    return web.json_response({"items": items})
+
+
+async def api_admin_machine_kinds_post(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    title = str((payload or {}).get("title") or "").strip()
+    mode = str((payload or {}).get("mode") or "list").strip().lower()
+    if not title:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    ok = add_machine_kind(title, mode)
+    if not ok:
+        return web.json_response({"error": "already exists"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_machine_kinds_patch(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    kind_id = _as_int(request.match_info.get("kind_id"), 0)
+    if kind_id <= 0:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    title = (payload or {}).get("title")
+    mode = (payload or {}).get("mode")
+    ok = update_machine_kind(kind_id, title=title, mode=mode)
+    if not ok:
+        return web.json_response({"error": "not updated"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_machine_kinds_delete(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    kind_id = _as_int(request.match_info.get("kind_id"), 0)
+    if kind_id <= 0:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    ok = delete_machine_kind(kind_id)
+    if not ok:
+        return web.json_response({"error": "not deleted"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_machine_items_get(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    kind_id = _as_int(request.query.get("kind_id"), 0)
+    if kind_id <= 0:
+        return web.json_response({"error": "invalid kind_id"}, status=422)
+    limit = _as_int(request.query.get("limit"), 200)
+    offset = _as_int(request.query.get("offset"), 0)
+    limit = max(1, min(500, limit))
+    offset = max(0, offset)
+    q = (request.query.get("q") or "").strip().lower()
+    items = list_machine_items(kind_id, limit=limit, offset=offset)
+    if q:
+        items = [it for it in (items or []) if q in str(it.get("name") or "").lower()]
+    return web.json_response({"items": items})
+
+
+async def api_admin_machine_items_post(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    kind_id = _as_int((payload or {}).get("kind_id"), 0)
+    name = str((payload or {}).get("name") or "").strip()
+    if kind_id <= 0 or not name:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    ok = add_machine_item(kind_id, name)
+    if not ok:
+        return web.json_response({"error": "already exists"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_machine_items_patch(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    item_id = _as_int(request.match_info.get("item_id"), 0)
+    new_name = str((payload or {}).get("name") or "").strip()
+    if item_id <= 0 or not new_name:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    ok = update_machine_item(item_id, new_name)
+    if not ok:
+        return web.json_response({"error": "not updated"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_machine_items_delete(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    item_id = _as_int(request.match_info.get("item_id"), 0)
+    if item_id <= 0:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    ok = delete_machine_item(item_id)
+    if not ok:
+        return web.json_response({"error": "not deleted"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_ware_get(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    limit = _as_int(request.query.get("limit"), 200)
+    offset = _as_int(request.query.get("offset"), 0)
+    limit = max(1, min(500, limit))
+    offset = max(0, offset)
+    q = (request.query.get("q") or "").strip().lower()
+    with connect() as con, closing(con.cursor()) as c:
+        if q:
+            rows = c.execute(
+                """
+                SELECT id, name, grp
+                FROM locations
+                WHERE grp=? AND LOWER(name) LIKE ?
+                ORDER BY name
+                LIMIT ? OFFSET ?
+                """,
+                (GROUP_WARE, f"%{q}%", limit, offset),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT id, name, grp FROM locations WHERE grp=? ORDER BY name LIMIT ? OFFSET ?",
+                (GROUP_WARE, limit, offset),
+            ).fetchall()
+    items = [{"id": int(r[0]), "name": r[1], "grp": r[2]} for r in rows]
+    return web.json_response({"items": items})
+
+
+async def api_admin_ware_post(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    name = str((payload or {}).get("name") or "").strip()
+    if not name:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    ok = add_location(GROUP_WARE, name)
+    if not ok:
+        return web.json_response({"error": "already exists"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_ware_patch(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    loc_id = _as_int(request.match_info.get("loc_id"), 0)
+    new_name = str((payload or {}).get("name") or "").strip()
+    if loc_id <= 0 or not new_name:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    loc = get_location_by_id(loc_id)
+    if not loc or (loc.get("grp") != GROUP_WARE):
+        return web.json_response({"error": "not found"}, status=404)
+    ok = update_location_name(loc_id, new_name)
+    if not ok:
+        return web.json_response({"error": "not updated"}, status=409)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_ware_delete(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    loc_id = _as_int(request.match_info.get("loc_id"), 0)
+    if loc_id <= 0:
+        return web.json_response({"error": "invalid payload"}, status=422)
+    loc = get_location_by_id(loc_id)
+    if not loc or (loc.get("grp") != GROUP_WARE):
+        return web.json_response({"error": "not found"}, status=404)
+    ok = delete_location_by_id(loc_id)
+    if not ok:
+        return web.json_response({"error": "not deleted"}, status=409)
+    return web.json_response({"ok": True})
 
 
 async def api_admin_roles_post(request: web.Request) -> web.StreamResponse:
@@ -561,13 +1508,66 @@ async def api_admin_roles_post(request: web.Request) -> web.StreamResponse:
         return denied
 
     target_id = _as_int((payload or {}).get("user_id"), 0)
+    if target_id <= 0:
+        raw_username = str((payload or {}).get("username") or "").strip()
+        if raw_username:
+            u = find_user_by_username(raw_username)
+            if u:
+                target_id = int(u["user_id"])
     role = str((payload or {}).get("role") or "").strip().lower()
-    if target_id <= 0 or role not in {"it", "tim", "brigadier"}:
-        return web.json_response({"error": "invalid payload"}, status=422)
+    if role not in {"it", "tim", "brigadier"}:
+        return web.json_response({"error": "invalid role"}, status=422)
+    if target_id <= 0:
+        return web.json_response({"error": "user not found"}, status=404)
     set_role(target_id, role, int(ctx["user_id"]))
     if role == "brigadier":
         add_brigadier(target_id, None, None, int(ctx["user_id"]))
     return web.json_response({"ok": True})
+
+
+async def api_admin_users_get(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    limit = _as_int(request.query.get("limit"), 200)
+    limit = max(1, min(500, limit))
+    q = (request.query.get("q") or "").strip().lower().lstrip("@")
+    with connect() as con, closing(con.cursor()) as c:
+        if q:
+            rows = c.execute(
+                """
+                SELECT user_id, username, full_name, created_at
+                FROM users
+                WHERE LOWER(username) LIKE ? OR LOWER(full_name) LIKE ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (f"%{q}%", f"%{q}%", limit),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                """
+                SELECT user_id, username, full_name, created_at
+                FROM users
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    items = [
+        {
+            "user_id": int(r[0]),
+            "username": r[1],
+            "full_name": r[2],
+            "created_at": r[3],
+        }
+        for r in rows
+    ]
+    return web.json_response({"items": items})
 
 
 async def api_admin_roles_delete(request: web.Request) -> web.StreamResponse:
@@ -726,7 +1726,7 @@ def _env_int(name: str, default: Optional[int] = None) -> Optional[int]:
 WEBAPP_HOST = os.getenv("WEBAPP_HOST", "0.0.0.0").strip() or "0.0.0.0"
 WEBAPP_PORT = _env_int("WEBAPP_PORT", _env_int("PORT", 8080) or 8080) or 8080
 WEBAPP_BASE_URL = os.getenv("WEBAPP_BASE_URL", "").strip()
-WEBAPP_URL = (WEBAPP_BASE_URL.rstrip("/") + "/webapp/") if WEBAPP_BASE_URL else ""
+WEBAPP_URL = (WEBAPP_BASE_URL.rstrip("/") + "/") if WEBAPP_BASE_URL else ""
 WEBAPP_DEV_USER_ID = _env_int("WEBAPP_DEV_USER_ID")
 WEBAPP_AUTH_MAX_AGE_SEC = int(os.getenv("WEBAPP_AUTH_MAX_AGE_SEC", "86400"))
 WEBAPP_SESSION_TTL_SEC = int(os.getenv("WEBAPP_SESSION_TTL_SEC", "86400"))
@@ -882,17 +1882,83 @@ def init_db():
         c.execute("""
         CREATE TABLE IF NOT EXISTS activities(
           id    INTEGER PRIMARY KEY AUTOINCREMENT,
-          name  TEXT UNIQUE,
-          grp   TEXT
+          name  TEXT,
+          grp   TEXT,
+          pos   INTEGER,
+          UNIQUE(grp, name)
         )
         """)
+
+        try:
+            idxs = c.execute("PRAGMA index_list('activities')").fetchall() or []
+            has_old_unique = False
+            for r in idxs:
+                if not r or len(r) < 3:
+                    continue
+                idx_name = r[1]
+                is_unique = int(r[2] or 0) == 1
+                if not is_unique:
+                    continue
+                cols = c.execute(f"PRAGMA index_info('{idx_name}')").fetchall() or []
+                col_names = [x[2] for x in cols if x and len(x) > 2]
+                if col_names == ["name"]:
+                    has_old_unique = True
+                    break
+
+            if has_old_unique:
+                c.execute("""
+                CREATE TABLE IF NOT EXISTS activities__new(
+                  id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name  TEXT,
+                  grp   TEXT,
+                  UNIQUE(grp, name)
+                )
+                """)
+                c.execute("INSERT INTO activities__new(id, name, grp) SELECT id, name, grp FROM activities")
+                c.execute("DROP TABLE activities")
+                c.execute("ALTER TABLE activities__new RENAME TO activities")
+        except Exception:
+            pass
         c.execute("""
         CREATE TABLE IF NOT EXISTS locations(
           id    INTEGER PRIMARY KEY AUTOINCREMENT,
-          name  TEXT UNIQUE,
-          grp   TEXT
+          name  TEXT,
+          grp   TEXT,
+          pos   INTEGER,
+          UNIQUE(grp, name)
         )
         """)
+
+        try:
+            idxs = c.execute("PRAGMA index_list('locations')").fetchall() or []
+            has_old_unique = False
+            for r in idxs:
+                if not r or len(r) < 3:
+                    continue
+                idx_name = r[1]
+                is_unique = int(r[2] or 0) == 1
+                if not is_unique:
+                    continue
+                cols = c.execute(f"PRAGMA index_info('{idx_name}')").fetchall() or []
+                col_names = [x[2] for x in cols if x and len(x) > 2]
+                if col_names == ["name"]:
+                    has_old_unique = True
+                    break
+
+            if has_old_unique:
+                c.execute("""
+                CREATE TABLE IF NOT EXISTS locations__new(
+                  id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name  TEXT,
+                  grp   TEXT,
+                  UNIQUE(grp, name)
+                )
+                """)
+                c.execute("INSERT INTO locations__new(id, name, grp) SELECT id, name, grp FROM locations")
+                c.execute("DROP TABLE locations")
+                c.execute("ALTER TABLE locations__new RENAME TO locations")
+        except Exception:
+            pass
         c.execute("""
         CREATE TABLE IF NOT EXISTS reports(
           id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1040,7 +2106,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS machine_kinds(
           id    INTEGER PRIMARY KEY AUTOINCREMENT,
           title TEXT UNIQUE,
-          mode  TEXT
+          mode  TEXT,
+          pos   INTEGER
         )
         """)
         c.execute("""
@@ -1048,6 +2115,7 @@ def init_db():
           id       INTEGER PRIMARY KEY AUTOINCREMENT,
           kind_id  INTEGER,
           name     TEXT,
+          pos      INTEGER,
           UNIQUE(kind_id, name)
         )
         """)
@@ -1057,6 +2125,38 @@ def init_db():
         if "mode" not in mkcols:
             c.execute("ALTER TABLE machine_kinds ADD COLUMN mode TEXT")
             c.execute("UPDATE machine_kinds SET mode='list' WHERE (mode IS NULL OR mode='')")
+
+        # миграции pos для справочников
+        acols = table_cols("activities")
+        if "pos" not in acols:
+            c.execute("ALTER TABLE activities ADD COLUMN pos INTEGER")
+            rows = c.execute("SELECT id FROM activities ORDER BY grp, name, id").fetchall() or []
+            for i, r in enumerate(rows):
+                c.execute("UPDATE activities SET pos=? WHERE id=?", (i + 1, int(r[0])))
+
+        lcols2 = table_cols("locations")
+        if "pos" not in lcols2:
+            c.execute("ALTER TABLE locations ADD COLUMN pos INTEGER")
+            rows = c.execute("SELECT id FROM locations ORDER BY grp, name, id").fetchall() or []
+            for i, r in enumerate(rows):
+                c.execute("UPDATE locations SET pos=? WHERE id=?", (i + 1, int(r[0])))
+
+        mkcols2 = table_cols("machine_kinds")
+        if "pos" not in mkcols2:
+            c.execute("ALTER TABLE machine_kinds ADD COLUMN pos INTEGER")
+            rows = c.execute("SELECT id FROM machine_kinds ORDER BY id").fetchall() or []
+            for i, r in enumerate(rows):
+                c.execute("UPDATE machine_kinds SET pos=? WHERE id=?", (i + 1, int(r[0])))
+
+        micols = table_cols("machine_items")
+        if "pos" not in micols:
+            c.execute("ALTER TABLE machine_items ADD COLUMN pos INTEGER")
+            rows = c.execute("SELECT id, kind_id FROM machine_items ORDER BY kind_id, name, id").fetchall() or []
+            per_kind = {}
+            for r in rows:
+                kid = int(r[1] or 0)
+                per_kind[kid] = per_kind.get(kid, 0) + 1
+                c.execute("UPDATE machine_items SET pos=? WHERE id=?", (per_kind[kid], int(r[0])))
 
         # дефолтные типы техники
         # mode: 'list' -> выбирать/вводить конкретную технику, 'single' -> техника без выбора имени
@@ -1091,14 +2191,40 @@ def init_db():
             c.execute("UPDATE activities SET grp=? WHERE (grp IS NULL OR grp='')", (GROUP_HAND,))
 
         # --- дефолтные справочники (вставляем, если ещё нет) ---
-        for name in DEFAULT_FIELDS:
-            c.execute("INSERT OR IGNORE INTO locations(name, grp) VALUES (?, ?)", (name, GROUP_FIELDS))
-        c.execute("INSERT OR IGNORE INTO locations(name, grp) VALUES (?, ?)", ("Склад", GROUP_WARE))
+        # Важно: не "воскрешаем" удалённые значения. Засев делаем только на пустую группу/таблицу.
+        fields_cnt = c.execute("SELECT COUNT(*) FROM locations WHERE grp=?", (GROUP_FIELDS,)).fetchone()[0] or 0
+        if int(fields_cnt) == 0:
+            for name in DEFAULT_FIELDS:
+                c.execute("INSERT OR IGNORE INTO locations(name, grp) VALUES (?, ?)", (name, GROUP_FIELDS))
 
-        for name in DEFAULT_TECH:
-            c.execute("INSERT OR IGNORE INTO activities(name, grp) VALUES (?, ?)", (name, GROUP_TECH))
-        for name in DEFAULT_HAND:
-            c.execute("INSERT OR IGNORE INTO activities(name, grp) VALUES (?, ?)", (name, GROUP_HAND))
+        ware_cnt = c.execute("SELECT COUNT(*) FROM locations WHERE grp=?", (GROUP_WARE,)).fetchone()[0] or 0
+        if int(ware_cnt) == 0:
+            c.execute("INSERT OR IGNORE INTO locations(name, grp) VALUES (?, ?)", ("Склад", GROUP_WARE))
+
+        tech_cnt = c.execute("SELECT COUNT(*) FROM activities WHERE grp=?", (GROUP_TECH,)).fetchone()[0] or 0
+        if int(tech_cnt) == 0:
+            for name in DEFAULT_TECH:
+                c.execute("INSERT OR IGNORE INTO activities(name, grp) VALUES (?, ?)", (name, GROUP_TECH))
+
+        hand_cnt = c.execute("SELECT COUNT(*) FROM activities WHERE grp=?", (GROUP_HAND,)).fetchone()[0] or 0
+        if int(hand_cnt) == 0:
+            for name in DEFAULT_HAND:
+                c.execute("INSERT OR IGNORE INTO activities(name, grp) VALUES (?, ?)", (name, GROUP_HAND))
+
+        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY, pos INTEGER)")
+        ccols = table_cols("crops")
+        if "pos" not in ccols:
+            c.execute("ALTER TABLE crops ADD COLUMN pos INTEGER")
+            rows = c.execute("SELECT rowid FROM crops ORDER BY name, rowid").fetchall() or []
+            for i, r in enumerate(rows):
+                c.execute("UPDATE crops SET pos=? WHERE rowid=?", (i + 1, int(r[0])))
+        crops_cnt = c.execute("SELECT COUNT(*) FROM crops").fetchone()[0] or 0
+        if int(crops_cnt) == 0:
+            for name in CROPS_LIST:
+                c.execute("INSERT OR IGNORE INTO crops(name) VALUES (?)", (name,))
+            rows = c.execute("SELECT rowid FROM crops ORDER BY name, rowid").fetchall() or []
+            for i, r in enumerate(rows):
+                c.execute("UPDATE crops SET pos=? WHERE rowid=?", (i + 1, int(r[0])))
 
         con.commit()
 
@@ -1428,7 +2554,10 @@ def get_role_label(user_id: int) -> str:
 
 def list_activities(grp: str) -> List[str]:
     with connect() as con, closing(con.cursor()) as c:
-        rows = c.execute("SELECT name FROM activities WHERE grp=? ORDER BY name", (grp,)).fetchall()
+        rows = c.execute(
+            "SELECT name FROM activities WHERE grp=? ORDER BY COALESCE(pos, 1000000), name",
+            (grp,),
+        ).fetchall()
         return [r[0] for r in rows]
 
 def add_activity(grp: str, name: str) -> bool:
@@ -1437,7 +2566,9 @@ def add_activity(grp: str, name: str) -> bool:
         return False
     with connect() as con, closing(con.cursor()) as c:
         try:
-            c.execute("INSERT INTO activities(name, grp) VALUES(?,?)", (name, grp))
+            r = c.execute("SELECT COALESCE(MAX(pos), 0) FROM activities WHERE grp=?", (grp,)).fetchone()
+            next_pos = int((r[0] if r else 0) or 0) + 1
+            c.execute("INSERT INTO activities(name, grp, pos) VALUES(?,?,?)", (name, grp, next_pos))
             con.commit()
             return True
         except sqlite3.IntegrityError:
@@ -1445,8 +2576,8 @@ def add_activity(grp: str, name: str) -> bool:
 
 def list_crops() -> List[str]:
     with connect() as con, closing(con.cursor()) as c:
-        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY)")
-        rows = c.execute("SELECT name FROM crops ORDER BY name").fetchall()
+        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY, pos INTEGER)")
+        rows = c.execute("SELECT name FROM crops ORDER BY COALESCE(pos, 1000000), name").fetchall()
         return [r[0] for r in rows]
 
 def add_crop(name: str) -> bool:
@@ -1455,10 +2586,12 @@ def add_crop(name: str) -> bool:
         return False
     # Убедимся, что таблица есть
     with connect() as con, closing(con.cursor()) as c:
-        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY)")
+        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY, pos INTEGER)")
     with connect() as con, closing(con.cursor()) as c:
         try:
-            c.execute("INSERT INTO crops(name) VALUES(?)", (name,))
+            r = c.execute("SELECT COALESCE(MAX(pos), 0) FROM crops").fetchone()
+            next_pos = int((r[0] if r else 0) or 0) + 1
+            c.execute("INSERT INTO crops(name, pos) VALUES(?,?)", (name, next_pos))
             con.commit()
             return True
         except sqlite3.IntegrityError:
@@ -1473,26 +2606,50 @@ def remove_crop(name: str) -> bool:
         return cur.rowcount > 0
 
 def remove_activity(name: str) -> bool:
+    return remove_activity_by_name(name=name, grp=None)
+
+
+def remove_activity_by_name(*, name: str, grp: Optional[str]) -> bool:
+    name = (name or "").strip()
+    if not name:
+        return False
     with connect() as con, closing(con.cursor()) as c:
-        cur = c.execute("DELETE FROM activities WHERE name=?", (name,))
+        if grp:
+            cur = c.execute("DELETE FROM activities WHERE name=? AND grp=?", (name, grp))
+        else:
+            cur = c.execute("DELETE FROM activities WHERE name=?", (name,))
+        con.commit()
+        return cur.rowcount > 0
+
+
+def remove_activity_in_group(act_id: int, grp: str) -> bool:
+    act_id = int(act_id or 0)
+    grp = str(grp or "").strip()
+    if act_id <= 0 or not grp:
+        return False
+    with connect() as con, closing(con.cursor()) as c:
+        cur = c.execute("DELETE FROM activities WHERE id=? AND grp=?", (act_id, grp))
         con.commit()
         return cur.rowcount > 0
 
 def list_locations(grp: str) -> List[str]:
     with connect() as con, closing(con.cursor()) as c:
-        rows = c.execute("SELECT name FROM locations WHERE grp=? ORDER BY name", (grp,)).fetchall()
+        rows = c.execute(
+            "SELECT name FROM locations WHERE grp=? ORDER BY COALESCE(pos, 1000000), name",
+            (grp,),
+        ).fetchall()
         return [r[0] for r in rows]
 
 def list_locations_rows(*, grp: Optional[str] = None, limit: int = 50, offset: int = 0) -> List[dict]:
     with connect() as con, closing(con.cursor()) as c:
         if grp:
             rows = c.execute(
-                "SELECT id, name, grp FROM locations WHERE grp=? ORDER BY name LIMIT ? OFFSET ?",
+                "SELECT id, name, grp FROM locations WHERE grp=? ORDER BY COALESCE(pos, 1000000), name LIMIT ? OFFSET ?",
                 (grp, limit, offset),
             ).fetchall()
         else:
             rows = c.execute(
-                "SELECT id, name, grp FROM locations ORDER BY grp, name LIMIT ? OFFSET ?",
+                "SELECT id, name, grp FROM locations ORDER BY grp, COALESCE(pos, 1000000), name LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
         return [{"id": r[0], "name": r[1], "grp": r[2]} for r in rows]
@@ -1533,7 +2690,7 @@ def delete_location_by_id(loc_id: int) -> bool:
 def list_activities_rows(*, grp: str, limit: int = 50, offset: int = 0) -> List[dict]:
     with connect() as con, closing(con.cursor()) as c:
         rows = c.execute(
-            "SELECT id, name, grp FROM activities WHERE grp=? ORDER BY name LIMIT ? OFFSET ?",
+            "SELECT id, name, grp FROM activities WHERE grp=? ORDER BY COALESCE(pos, 1000000), name LIMIT ? OFFSET ?",
             (grp, limit, offset),
         ).fetchall()
         return [{"id": r[0], "name": r[1], "grp": r[2]} for r in rows]
@@ -1549,6 +2706,18 @@ def get_activity_by_id(act_id: int) -> Optional[dict]:
         if not r:
             return None
         return {"id": r[0], "name": r[1], "grp": r[2]}
+
+
+def count_activities_by_name_norm(*, grp: str, name: str) -> int:
+    name = (name or "").strip().lower()
+    if not grp or not name:
+        return 0
+    with connect() as con, closing(con.cursor()) as c:
+        r = c.execute(
+            "SELECT COUNT(*) FROM activities WHERE grp=? AND LOWER(TRIM(name))=?",
+            (grp, name),
+        ).fetchone()
+        return int((r[0] if r else 0) or 0)
 
 def update_activity_name(act_id: int, new_name: str) -> bool:
     new_name = (new_name or "").strip()
@@ -1570,8 +2739,11 @@ def delete_activity_by_id(act_id: int) -> bool:
 
 def list_crops_rows(limit: int = 50, offset: int = 0) -> List[dict]:
     with connect() as con, closing(con.cursor()) as c:
-        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY)")
-        rows = c.execute("SELECT rowid, name FROM crops ORDER BY name LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+        c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY, pos INTEGER)")
+        rows = c.execute(
+            "SELECT rowid, name FROM crops ORDER BY COALESCE(pos, 1000000), name LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
         return [{"id": r[0], "name": r[1]} for r in rows]
 
 def count_crops() -> int:
@@ -1615,7 +2787,7 @@ def delete_crop_by_rowid(crop_rowid: int) -> bool:
 def list_machine_kinds(limit: int = 50, offset: int = 0) -> List[dict]:
     with connect() as con, closing(con.cursor()) as c:
         rows = c.execute(
-            "SELECT id, title, mode FROM machine_kinds ORDER BY id ASC LIMIT ? OFFSET ?",
+            "SELECT id, title, mode FROM machine_kinds ORDER BY COALESCE(pos, 1000000), id ASC LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
         return [{"id": r[0], "title": r[1], "mode": r[2] or "list"} for r in rows]
@@ -1641,7 +2813,9 @@ def add_machine_kind(title: str, mode: str = "list") -> bool:
         mode = "list"
     with connect() as con, closing(con.cursor()) as c:
         try:
-            c.execute("INSERT INTO machine_kinds(title, mode) VALUES(?,?)", (title, mode))
+            r = c.execute("SELECT COALESCE(MAX(pos), 0) FROM machine_kinds").fetchone()
+            next_pos = int((r[0] if r else 0) or 0) + 1
+            c.execute("INSERT INTO machine_kinds(title, mode, pos) VALUES(?,?,?)", (title, mode, next_pos))
             con.commit()
             return True
         except sqlite3.IntegrityError:
@@ -1658,7 +2832,7 @@ def delete_machine_kind(kind_id: int) -> bool:
 def list_machine_items(kind_id: int, limit: int = 50, offset: int = 0) -> List[dict]:
     with connect() as con, closing(con.cursor()) as c:
         rows = c.execute(
-            "SELECT id, kind_id, name FROM machine_items WHERE kind_id=? ORDER BY name LIMIT ? OFFSET ?",
+            "SELECT id, kind_id, name FROM machine_items WHERE kind_id=? ORDER BY COALESCE(pos, 1000000), name LIMIT ? OFFSET ?",
             (kind_id, limit, offset),
         ).fetchall()
         return [{"id": r[0], "kind_id": r[1], "name": r[2]} for r in rows]
@@ -1681,7 +2855,9 @@ def add_machine_item(kind_id: int, name: str) -> bool:
         return False
     with connect() as con, closing(con.cursor()) as c:
         try:
-            c.execute("INSERT INTO machine_items(kind_id, name) VALUES(?,?)", (kind_id, name))
+            r = c.execute("SELECT COALESCE(MAX(pos), 0) FROM machine_items WHERE kind_id=?", (kind_id,)).fetchone()
+            next_pos = int((r[0] if r else 0) or 0) + 1
+            c.execute("INSERT INTO machine_items(kind_id, name, pos) VALUES(?,?,?)", (kind_id, name, next_pos))
             con.commit()
             return True
         except sqlite3.IntegrityError:
@@ -1711,7 +2887,9 @@ def add_location(grp: str, name: str) -> bool:
         return False
     with connect() as con, closing(con.cursor()) as c:
         try:
-            c.execute("INSERT INTO locations(name, grp) VALUES(?,?)", (name, grp))
+            r = c.execute("SELECT COALESCE(MAX(pos), 0) FROM locations WHERE grp=?", (grp,)).fetchone()
+            next_pos = int((r[0] if r else 0) or 0) + 1
+            c.execute("INSERT INTO locations(name, grp, pos) VALUES(?,?,?)", (name, grp, next_pos))
             con.commit()
             return True
         except sqlite3.IntegrityError:
@@ -1787,8 +2965,18 @@ def fetch_brig_stats(user_id: int, start_date: date, end_date: date) -> dict:
     return stats
 
 def remove_location(name: str) -> bool:
+    return remove_location_by_name(name=name, grp=None)
+
+
+def remove_location_by_name(*, name: str, grp: Optional[str]) -> bool:
+    name = (name or "").strip()
+    if not name:
+        return False
     with connect() as con, closing(con.cursor()) as c:
-        cur = c.execute("DELETE FROM locations WHERE name=?", (name,))
+        if grp:
+            cur = c.execute("DELETE FROM locations WHERE name=? AND grp=?", (name, grp))
+        else:
+            cur = c.execute("DELETE FROM locations WHERE name=?", (name,))
         con.commit()
         return cur.rowcount > 0
 
@@ -3855,7 +5043,7 @@ def otd_machine_name_kb(kind_id: int) -> InlineKeyboardMarkup:
 
 def otd_tractor_work_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for w in OTD_TRACTOR_WORKS:
+    for w in _activities_with_other(GROUP_TECH):
         kb.button(text=w, callback_data=f"otd:twork:{w}")
     kb.adjust(2)
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:tractor"))
@@ -3863,10 +5051,23 @@ def otd_tractor_work_kb() -> InlineKeyboardMarkup:
 
 def otd_fields_kb(back_to:str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for f_name in OTD_FIELDS:
+    fields = list_locations(GROUP_FIELDS)
+    ware = list_locations(GROUP_WARE)
+    seen = set()
+    for f_name in (fields or []):
+        if not f_name:
+            continue
+        if f_name in seen:
+            continue
+        seen.add(f_name)
         kb.button(text=f_name, callback_data=f"{back_to}:{f_name}")
-    # отдельной опцией
-    kb.button(text="Склад", callback_data=f"{back_to}:Склад")
+    for w_name in (ware or []):
+        if not w_name:
+            continue
+        if w_name in seen:
+            continue
+        seen.add(w_name)
+        kb.button(text=w_name, callback_data=f"{back_to}:{w_name}")
     # свободный ввод
     kb.button(text="Прочее", callback_data=f"{back_to}:__other__")
     kb.adjust(2)
@@ -3875,7 +5076,7 @@ def otd_fields_kb(back_to:str) -> InlineKeyboardMarkup:
 
 def otd_crops_kb(*, kamaz: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    crops = KAMAZ_CARGO_LIST if kamaz else OTD_CROPS
+    crops = _kamaz_cargo_list() if kamaz else _crops_with_other()
     for c_name in crops:
         # "Прочее" должно вести на свободный ввод (а не сохраняться как значение)
         if (c_name or "").strip() == "Прочее":
@@ -3888,7 +5089,7 @@ def otd_crops_kb(*, kamaz: bool = False) -> InlineKeyboardMarkup:
 
 def otd_hand_work_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for w in OTD_HAND_WORKS:
+    for w in _activities_with_other(GROUP_HAND):
         kb.button(text=w, callback_data=f"otd:hand:{w}")
     kb.adjust(2)
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="otd:back:type"))
@@ -6029,7 +7230,7 @@ def _brig_hours_kb() -> InlineKeyboardMarkup:
 
 def _brig_ob_crop_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for crop in CROPS_LIST:
+    for crop in _crops_with_other():
         kb.button(text=crop, callback_data=f"brig:crop:{crop}")
     kb.button(text="🔙 Назад", callback_data="brig:back:hours")
     kb.adjust(2, 2)
@@ -6189,7 +7390,7 @@ async def brig_pick_mode(c: CallbackQuery, state: FSMContext):
     if mode == "hand":
         await state.set_state(BrigFSM.pick_activity)
         kb = InlineKeyboardBuilder()
-        for act in BRIG_HAND_ACTIVITIES:
+        for act in _activities_no_other(GROUP_HAND):
             kb.button(text=act, callback_data=f"brig:act:{act}")
         kb.button(text="Прочее", callback_data="brig:act:__other__")
         kb.button(text="🔙 Назад", callback_data="brig:back:mode")
@@ -6255,7 +7456,7 @@ async def brig_pick_machine_kind(c: CallbackQuery, state: FSMContext):
         await state.update_data(brig=brig)
         await state.set_state(BrigFSM.pick_kamaz_crop)
         kb = InlineKeyboardBuilder()
-        for name in KAMAZ_CARGO_LIST:
+        for name in _kamaz_cargo_list():
             kb.button(text=name, callback_data=f"brig:kcrop:{name}")
         kb.button(text="🔙 Назад", callback_data="brig:back:mkind")
         kb.adjust(2,2)
@@ -6304,7 +7505,7 @@ async def brig_pick_machine_name(c: CallbackQuery, state: FSMContext):
         await state.update_data(brig=brig)
         await state.set_state(BrigFSM.pick_machine_activity)
         kb = InlineKeyboardBuilder()
-        for act in ["Сев", "Опрыскивание", "Междурядная Культивация (МК)", "Боронование", "Уборка", "Дискование", "Пахота", "Чизелевание", "Навоз"]:
+        for act in _activities_no_other(GROUP_TECH):
             kb.button(text=act, callback_data=f"brig:mact:{act}")
         kb.button(text="Прочее", callback_data="brig:mact:__other__")
         kb.button(text="🔙 Назад", callback_data="brig:back:mname")
@@ -6334,7 +7535,7 @@ async def brig_pick_machine_name_custom(message: Message, state: FSMContext):
     await state.update_data(brig=brig)
     await state.set_state(BrigFSM.pick_machine_activity)
     kb = InlineKeyboardBuilder()
-    for act in ["Сев", "Опрыскивание", "Междурядная Культивация (МК)", "Боронование", "Уборка", "Дискование", "Пахота", "Чизелевание", "Навоз"]:
+    for act in _activities_no_other(GROUP_TECH):
         kb.button(text=act, callback_data=f"brig:mact:{act}")
     kb.button(text="Прочее", callback_data="brig:mact:__other__")
     kb.button(text="🔙 Назад", callback_data="brig:back:mname")
@@ -6375,7 +7576,7 @@ async def brig_pick_machine_activity(c: CallbackQuery, state: FSMContext):
         await state.update_data(brig=brig)
         await state.set_state(BrigFSM.pick_machine_crop)
         kb = InlineKeyboardBuilder()
-        for crop in CROPS_LIST:
+        for crop in _crops_with_other():
             kb.button(text=crop, callback_data=f"brig:mcrop:{crop}")
         kb.button(text="🔙 Назад", callback_data="brig:back:mact")
     kb.adjust(2,2)
@@ -6387,7 +7588,7 @@ async def brig_pick_machine_activity(c: CallbackQuery, state: FSMContext):
 async def brig_back_mact(c: CallbackQuery, state: FSMContext):
     await state.set_state(BrigFSM.pick_machine_activity)
     kb = InlineKeyboardBuilder()
-    for act in ["Сев", "Опрыскивание", "Междурядная Культивация (МК)", "Боронование", "Уборка", "Дискование", "Пахота", "Чизелевание", "Навоз"]:
+    for act in _activities_no_other(GROUP_TECH):
         kb.button(text=act, callback_data=f"brig:mact:{act}")
     kb.button(text="Прочее", callback_data="brig:mact:__other__")
     kb.button(text="🔙 Назад", callback_data="brig:back:mname")
@@ -6417,7 +7618,7 @@ async def brig_pick_machine_activity_custom(message: Message, state: FSMContext)
     await state.update_data(brig=brig)
     await state.set_state(BrigFSM.pick_machine_crop)
     kb = InlineKeyboardBuilder()
-    for crop in CROPS_LIST:
+    for crop in _crops_with_other():
         kb.button(text=crop, callback_data=f"brig:mcrop:{crop}")
     kb.button(text="🔙 Назад", callback_data="brig:back:mact")
     kb.adjust(2,2)
@@ -6464,7 +7665,7 @@ async def brig_pick_machine_crop(c: CallbackQuery, state: FSMContext):
 async def brig_back_mcrop(c: CallbackQuery, state: FSMContext):
     await state.set_state(BrigFSM.pick_machine_crop)
     kb = InlineKeyboardBuilder()
-    for crop in CROPS_LIST:
+    for crop in _crops_with_other():
         kb.button(text=crop, callback_data=f"brig:mcrop:{crop}")
     kb.button(text="🔙 Назад", callback_data="brig:back:mact")
     kb.adjust(2,2)
@@ -6739,7 +7940,7 @@ async def brig_back_crop(c: CallbackQuery, state: FSMContext):
                             "Выберите культуру:", reply_markup=_brig_ob_crop_kb())
     else:
         kb = InlineKeyboardBuilder()
-        for crop in CROPS_LIST:
+        for crop in _crops_with_other():
             kb.button(text=crop, callback_data=f"brig:crop:{crop}")
         kb.button(text="🔙 Назад", callback_data="brig:back:activity")
         kb.adjust(2,2)
@@ -6795,7 +7996,7 @@ async def brig_pick_activity(c: CallbackQuery, state: FSMContext):
     else:
         await state.set_state(BrigFSM.pick_crop)
         kb = InlineKeyboardBuilder()
-        for crop in CROPS_LIST:
+        for crop in _crops_with_other():
             kb.button(text=crop, callback_data=f"brig:crop:{crop}")
         kb.button(text="🔙 Назад", callback_data="brig:back:activity")
         kb.adjust(2,2)
@@ -6824,7 +8025,7 @@ async def brig_pick_activity_custom(message: Message, state: FSMContext):
     await state.update_data(brig=brig)
     await state.set_state(BrigFSM.pick_crop)
     kb = InlineKeyboardBuilder()
-    for crop in CROPS_LIST:
+    for crop in _crops_with_other():
         kb.button(text=crop, callback_data=f"brig:crop:{crop}")
     kb.button(text="🔙 Назад", callback_data="brig:back:activity")
     kb.adjust(2,2)
@@ -6835,7 +8036,7 @@ async def brig_pick_activity_custom(message: Message, state: FSMContext):
 async def brig_back_activity(c: CallbackQuery, state: FSMContext):
     await state.set_state(BrigFSM.pick_activity)
     kb = InlineKeyboardBuilder()
-    for act in BRIG_HAND_ACTIVITIES:
+    for act in _activities_no_other(GROUP_HAND):
         kb.button(text=act, callback_data=f"brig:act:{act}")
     kb.button(text="Прочее", callback_data="brig:act:__other__")
     kb.button(text="🔙 Назад", callback_data="brig:back:mode")
@@ -7130,7 +8331,7 @@ async def brig_confirm_back(c: CallbackQuery, state: FSMContext):
     if target == "tech_crop":
         await state.set_state(BrigFSM.pick_machine_crop)
         kb = InlineKeyboardBuilder()
-        for crop in CROPS_LIST:
+        for crop in _crops_with_other():
             kb.button(text=crop, callback_data=f"brig:mcrop:{crop}")
         kb.button(text="🔙 Назад", callback_data="brig:back:mact")
         kb.adjust(2,2)
@@ -7256,7 +8457,7 @@ def _render_brig_stats_ob(stats: dict, period: str, start: date, end: date) -> s
     if by_crop:
         # стабильный порядок: сначала известные культуры из списка, потом остальное
         ordered = []
-        for c in CROPS_LIST + ["Навоз"]:
+        for c in _crops_with_other() + ["Навоз"]:
             if c in by_crop:
                 ordered.append(c)
         for c in sorted(by_crop.keys()):
@@ -7886,7 +9087,7 @@ async def adm_root_tech_delpick_legacy(c: CallbackQuery):
         await c.answer("Нет прав", show_alert=True)
         return
     name = c.data.split(":", 3)[3].replace("_", " ")
-    remove_activity(name)
+    remove_activity_by_name(name=name, grp=GROUP_TECH)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                         f"Техника '{name}' удалена.", reply_markup=admin_root_tech_kb())
     await c.answer("Удалено")
@@ -8000,7 +9201,7 @@ async def adm_confirm_delete(c: CallbackQuery):
                             reply_markup=admin_root_loc_list_kb(page=0))
     elif kind == "act" and len(parts) >= 6:
         grp = parts[4]
-        ok = delete_activity_by_id(int(parts[5]))
+        ok = remove_activity_in_group(int(parts[5]), grp)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
                             ("✅ Удалено" if ok else "⚠️ Не удалось удалить"),
                             reply_markup=admin_root_act_list_kb(grp, page=0))
@@ -8407,7 +9608,7 @@ async def _admin_stats_show_user_reports(
             text.append(f"\n• #{rid} {d} | {loc} — {act}: <b>{h}</b> ч{extra_str}")
             kb.row(
                 InlineKeyboardButton(text=f"🖊 Изменить #{rid}", callback_data=f"edit:chg:{rid}:{d}"),
-                InlineKeyboardButton(text=f"🗑 Удалить #{rid}", callback_data=f"edit:del:{rid}"),
+                InlineKeyboardButton(text=f"🗑 Удалить #{rid}", callback_data=f"edit:del:{rid}")
             )
 
     # Навигация по страницам
@@ -9742,7 +10943,12 @@ async def adm_delete_pick(c: CallbackQuery, state: FSMContext):
         return
     
     # Удаляем элемент
-    ok = remove_activity(original_name) if kind == "act" else remove_location(original_name)
+    if kind == "act":
+        grp_name = GROUP_TECH if grp == "tech" else GROUP_HAND
+        ok = remove_activity_by_name(name=original_name, grp=grp_name)
+    else:
+        grp_name = GROUP_FIELDS if grp == "fields" else GROUP_WARE
+        ok = remove_location_by_name(name=original_name, grp=grp_name)
     if ok:
         await c.answer("Удалено")
     else:
@@ -10047,7 +11253,7 @@ async def _api_auth_telegram(request: web.Request) -> web.StreamResponse:
 
 
 async def _webapp_redirect(_: web.Request) -> web.StreamResponse:
-    raise web.HTTPFound("/webapp/")
+    raise web.HTTPFound("/app/")
 
 
 async def _webapp_index(_: web.Request) -> web.StreamResponse:
@@ -10127,8 +11333,10 @@ async def _start_webapp_server() -> Optional[web.AppRunner]:
         return None
     app = web.Application()
     app.router.add_get("/", _webapp_redirect)
+    app.router.add_get("/app", _webapp_redirect)
+    app.router.add_get("/app/", _webapp_index)
     app.router.add_get("/webapp", _webapp_redirect)
-    app.router.add_get("/webapp/", _webapp_index)
+    app.router.add_get("/webapp/", _webapp_redirect)
     app.router.add_post("/api/auth/telegram", _api_auth_telegram)
     # New Mini App HTTP API (controllers)
     app.router.add_get("/api/me", api_get_me)
@@ -10136,6 +11344,9 @@ async def _start_webapp_server() -> Optional[web.AppRunner]:
     app.router.add_get("/api/dictionaries", api_get_dictionaries)
     app.router.add_get("/api/machine/items", api_get_machine_items)
     app.router.add_post("/api/report", api_post_report)
+    app.router.add_get("/api/reports", api_get_reports)
+    app.router.add_get("/api/reports/months", api_get_reports_months)
+    app.router.add_get("/api/reports/{report_id}", api_get_report_one)
     app.router.add_get("/api/stats", api_get_stats)
     app.router.add_post("/api/profile/name", api_post_profile_name)
     app.router.add_post("/api/brig/ob", api_post_brig_ob)
@@ -10144,10 +11355,42 @@ async def _start_webapp_server() -> Optional[web.AppRunner]:
     app.router.add_get("/api/admin/roles", api_admin_roles_get)
     app.router.add_post("/api/admin/roles", api_admin_roles_post)
     app.router.add_delete("/api/admin/roles/{user_id}", api_admin_roles_delete)
+    app.router.add_get("/api/admin/users", api_admin_users_get)
+    app.router.add_get("/api/admin/fields", api_admin_fields_get)
+    app.router.add_post("/api/admin/fields", api_admin_fields_post)
+    app.router.add_patch("/api/admin/fields/{loc_id}", api_admin_fields_patch)
+    app.router.add_delete("/api/admin/fields/{loc_id}", api_admin_fields_delete)
+    app.router.add_post("/api/admin/fields/reorder", api_admin_fields_reorder)
+    app.router.add_get("/api/admin/ware", api_admin_ware_get)
+    app.router.add_post("/api/admin/ware", api_admin_ware_post)
+    app.router.add_patch("/api/admin/ware/{loc_id}", api_admin_ware_patch)
+    app.router.add_delete("/api/admin/ware/{loc_id}", api_admin_ware_delete)
+    app.router.add_post("/api/admin/ware/reorder", api_admin_ware_reorder)
+    app.router.add_get("/api/admin/crops", api_admin_crops_get)
+    app.router.add_post("/api/admin/crops", api_admin_crops_post)
+    app.router.add_patch("/api/admin/crops/{crop_id}", api_admin_crops_patch)
+    app.router.add_delete("/api/admin/crops/{crop_id}", api_admin_crops_delete)
+    app.router.add_post("/api/admin/crops/reorder", api_admin_crops_reorder)
+    app.router.add_get("/api/admin/activities", api_admin_activities_get)
+    app.router.add_post("/api/admin/activities", api_admin_activities_post)
+    app.router.add_patch("/api/admin/activities/{act_id}", api_admin_activities_patch)
+    app.router.add_delete("/api/admin/activities/{act_id}", api_admin_activities_delete)
+    app.router.add_post("/api/admin/activities/reorder", api_admin_activities_reorder)
+    app.router.add_get("/api/admin/machine/kinds", api_admin_machine_kinds_get)
+    app.router.add_post("/api/admin/machine/kinds", api_admin_machine_kinds_post)
+    app.router.add_patch("/api/admin/machine/kinds/{kind_id}", api_admin_machine_kinds_patch)
+    app.router.add_delete("/api/admin/machine/kinds/{kind_id}", api_admin_machine_kinds_delete)
+    app.router.add_post("/api/admin/machine/kinds/reorder", api_admin_machine_kinds_reorder)
+    app.router.add_get("/api/admin/machine/items", api_admin_machine_items_get)
+    app.router.add_post("/api/admin/machine/items", api_admin_machine_items_post)
+    app.router.add_patch("/api/admin/machine/items/{item_id}", api_admin_machine_items_patch)
+    app.router.add_delete("/api/admin/machine/items/{item_id}", api_admin_machine_items_delete)
+    app.router.add_post("/api/admin/machine/items/reorder", api_admin_machine_items_reorder)
     app.router.add_post("/api/admin/export", api_admin_export_post)
 
     # Backward compatibility (webapp v0)
     app.router.add_post("/api/me", _api_me)
+    app.router.add_static("/app/", path=str(webapp_dir), show_index=False)
     app.router.add_static("/webapp/", path=str(webapp_dir), show_index=False)
     runner = web.AppRunner(app)
     await runner.setup()

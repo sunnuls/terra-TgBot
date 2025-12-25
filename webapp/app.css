@@ -12,14 +12,16 @@
 
 *{box-sizing:border-box}
 html,body{height:100%}
+html{background:var(--bg)}
 body{
   margin:0;
   font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial,"Noto Sans","Liberation Sans",sans-serif;
   background:radial-gradient(1200px 600px at 50% -10%, rgba(79,140,255,.25), transparent 60%), var(--bg);
   color:var(--text);
+  overscroll-behavior-y:none;
 }
 
-.app{min-height:100%; display:flex; flex-direction:column}
+.app{min-height:100%; display:flex; flex-direction:column; background:var(--bg)}
 
 .topbar{
   padding:18px 18px 10px;
@@ -66,10 +68,11 @@ body{
 
 .miniStats{margin-top:12px; display:grid; grid-template-columns:1fr 1fr; gap:10px}
 @media (max-width:420px){.miniStats{grid-template-columns:1fr 1fr}}
-.miniStat{padding:10px 10px; border:1px solid var(--border); border-radius:14px; background:rgba(255,255,255,.02)}
+.miniStat{padding:12px 14px; border-radius:18px; border:1px solid var(--border); background:rgba(255,255,255,.03); cursor:pointer}
+.miniStat:active{transform:translateY(1px)}
 .miniStat__label{font-size:12px; color:var(--muted)}
-.miniStat__value{margin-top:6px; font-size:18px; font-weight:800}
-.miniStat__hint{margin-top:4px; font-size:11px; color:rgba(255,255,255,.7)}
+.miniStat__value{margin-top:6px; font-weight:800; font-size:22px}
+.miniStat__hint{margin-top:2px; font-size:12px; color:var(--muted)}
 
 .grid2{display:grid; grid-template-columns:1fr 1fr; gap:12px}
 @media (max-width:420px){.grid2{grid-template-columns:1fr}}
@@ -103,11 +106,55 @@ body{
 
 .footer{
   margin-top:auto;
-  padding:14px;
+  padding:14px 14px 28px;
   width:min(820px, 100%);
   margin-left:auto;
   margin-right:auto;
 }
+
+.footer:has(#backBtn[hidden]){display:none}
+
+.toast{
+  position:fixed;
+  left:50%;
+  bottom:22px;
+  transform:translateX(-50%);
+  padding:10px 12px;
+  border-radius:14px;
+  border:1px solid rgba(255,255,255,.12);
+  background:rgba(11,15,20,.75);
+  backdrop-filter: blur(10px);
+  color:var(--text);
+  width:min(520px, calc(100% - 28px));
+  text-align:center;
+  z-index:1000;
+}
+
+.list{
+  margin-top:10px;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+
+.listItem{
+  width:100%;
+  text-align:left;
+  padding:12px 12px;
+  border-radius:14px;
+  border:1px solid var(--border);
+  background:rgba(255,255,255,.02);
+  color:var(--text);
+  cursor:pointer;
+}
+.listItem:active{transform:translateY(1px)}
+.listItem__top{display:flex; align-items:flex-start; justify-content:space-between; gap:10px}
+.listItem__title{font-weight:750}
+.listItem__meta{margin-top:4px; font-size:12px; color:rgba(255,255,255,.75)}
+
+.searchResults{display:flex; flex-direction:column; gap:8px}
+.searchItem{width:100%; text-align:left; padding:10px 12px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,.02); color:var(--text); cursor:pointer}
+.searchItem:active{transform:translateY(1px)}
 
 .btn{
   width:100%;
@@ -118,7 +165,91 @@ body{
   color:var(--text);
   cursor:pointer;
 }
+.btn:active{transform:translateY(1px)}
+.btn[disabled]{opacity:.6; cursor:default}
 .btn--secondary:hover{border-color:rgba(255,255,255,.18)}
+
+.btn--active{
+  border-color:rgba(255,255,255,.28);
+  background:rgba(255,255,255,.10);
+}
+
+.btn--icon{
+  width:auto;
+  padding:10px 12px;
+  border-radius:14px;
+  line-height:1;
+}
+
+.listRow--sortable{
+  cursor:grab;
+}
+.listRow--sortable:active{
+  cursor:grabbing;
+}
+.listRow--dragging{
+  opacity:.55;
+}
+
+.adminTabsRow{
+  display:flex;
+  gap:10px;
+  overflow-x:auto;
+  overflow-y:hidden;
+  padding-bottom:2px;
+  -webkit-overflow-scrolling:touch;
+  overscroll-behavior-x:contain;
+  touch-action:pan-x;
+}
+
+.adminTabsRow .btn{
+  flex:0 0 auto;
+  width:auto;
+  white-space:nowrap;
+}
+
+#adminSectionRoles > *{
+  margin-top:14px;
+}
+#adminSectionRoles > *:first-child{
+  margin-top:0;
+}
+
+.fieldError{
+  margin-top:6px;
+  font-size:12px;
+  color:rgba(255,93,93,.95);
+  line-height:1.2;
+}
+
+.cropWrap{
+  margin-top:10px;
+  width:100%;
+  aspect-ratio: 1 / 1;
+  border-radius:18px;
+  border:1px solid var(--border);
+  background:rgba(255,255,255,.02);
+  position:relative;
+  overflow:hidden;
+}
+
+.cropCanvas{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  image-rendering: auto;
+  touch-action: none;
+}
+
+.cropFrame{
+  position:absolute;
+  inset:10px;
+  border-radius:18px;
+  border:2px solid rgba(255,255,255,.35);
+  box-shadow: 0 0 0 9999px rgba(0,0,0,.25);
+  pointer-events:none;
+}
 
 .inputWrap{
   width:100%;
@@ -191,12 +322,12 @@ body{
 }
 
 .weather--rain::after{
-  opacity:.35;
+  opacity:.62;
   background-image:
-    repeating-linear-gradient(120deg, rgba(255,255,255,.28) 0 1px, transparent 1px 14px),
-    repeating-linear-gradient(120deg, rgba(255,255,255,.14) 0 1px, transparent 1px 18px);
-  background-size: 140px 220px, 180px 220px;
-  animation: rainMove 1.3s linear infinite;
+    repeating-linear-gradient(120deg, rgba(255,255,255,.34) 0 1px, transparent 1px 12px),
+    repeating-linear-gradient(120deg, rgba(255,255,255,.22) 0 1px, transparent 1px 16px);
+  background-size: 120px 220px, 160px 220px;
+  animation: rainMove .95s linear infinite;
 }
 
 .weather--snow::after{
@@ -212,7 +343,7 @@ body{
 
 .weather__top{display:flex; align-items:flex-start; justify-content:space-between; gap:10px}
 .weather__place{font-size:12px; color:rgba(255,255,255,.75); letter-spacing:.2px}
-.weather__temp{font-size:44px; font-weight:800; line-height:1}
+.weather__temp{font-size:44px; font-weight:900; line-height:1; text-shadow: 0 2px 14px rgba(0,0,0,.45), 0 0 1px rgba(0,0,0,.6)}
 .weather__bottom{margin-top:10px}
 .weather__desc{font-size:14px; font-weight:650}
 .weather__meta{margin-top:6px; display:flex; gap:10px; flex-wrap:wrap; font-size:12px; color:rgba(255,255,255,.75)}
@@ -233,19 +364,172 @@ body{
   cursor:pointer;
   text-align:left;
 }
+
+.locCard__topLabel{
+  position:absolute;
+  top:10px;
+  left:10px;
+  display:flex;
+  align-items:flex-start;
+  justify-content:flex-end;
+  gap:10px;
+  width:calc(100% - 20px);
+  z-index:4;
+  pointer-events:none;
+}
+
+.locCard__topRight{
+  display:flex;
+  flex-direction:column;
+  align-items:flex-end;
+  gap:2px;
+  max-width:70%;
+}
+
+.locCard__topName{
+  font-size:12px;
+  font-weight:700;
+  color:rgba(255,255,255,.9);
+  text-shadow: 0 2px 10px rgba(0,0,0,.45);
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  opacity:.92;
+}
+
+.locCard__topTemp{
+  font-size:20px;
+  font-weight:900;
+  color:rgba(255,255,255,.96);
+  text-shadow: 0 2px 12px rgba(0,0,0,.55);
+}
+
+.locCard--px{background:transparent}
+.locCard--px::before{display:none}
+
+.pxScene{
+  position:absolute;
+  inset:0;
+  z-index:0;
+  pointer-events:none;
+}
+
+.pxLayer{
+  position:absolute;
+  inset:0;
+  background-repeat:no-repeat;
+  background-position:center;
+  background-size:cover;
+  image-rendering: pixelated;
+}
+
+.pxTint{
+  position:absolute;
+  inset:0;
+  background:transparent;
+  opacity:.12;
+  mix-blend-mode:screen;
+  z-index:2;
+}
+
+.pxCanvas{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  image-rendering: pixelated;
+  pointer-events:none;
+  z-index:1;
+}
+
+/* keep text above scene */
+.locCard__row,.locCard__meta{position:relative; z-index:4}
+
+/* darken background behind digits for readability */
+.locCard::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  z-index:2;
+  pointer-events:none;
+  background:
+    radial-gradient(260px 180px at 92% 18%, rgba(0,0,0,.62) 0%, rgba(0,0,0,0) 70%),
+    linear-gradient(180deg, rgba(0,0,0,.35) 0%, rgba(0,0,0,0) 55%);
+}
+
+/* Defaults (works even if assets are not present yet) */
+.pxLayer--sky{background-color:#18304a}
+.pxLayer--horizon{opacity:.9}
+.pxLayer--ground{opacity:.95}
+
+/* Weather visibility */
+.pxScene[data-weather="clear"] .pxLayer--precip{display:none}
+.pxScene[data-weather="clear"] .pxLayer--fog{display:none}
+.pxScene[data-weather="fog"] .pxLayer--precip{display:none}
+.pxScene[data-weather="rain"] .pxLayer--fog{display:none}
+.pxScene[data-weather="snow"] .pxLayer--fog{display:none}
+.pxScene[data-weather="storm"] .pxLayer--fog{display:none}
+
+/* Temperature tint (solid overlay, no gradients) */
+.pxScene[data-tempband="cold"] .pxTint{background:#6FB7FF; opacity:.12}
+.pxScene[data-tempband="cool"] .pxTint{background:#8CCBFF; opacity:.08}
+.pxScene[data-tempband="mild"] .pxTint{background:#FFD59A; opacity:.03}
+.pxScene[data-tempband="warm"] .pxTint{background:#FFCE6B; opacity:.09}
+
+/* Base asset mapping (replace files later, structure is ready) */
+.pxScene[data-season="winter"] .pxLayer--ground{background-image:url("./assets/layers/ground/ground_winter.jpg")}
+.pxScene[data-season="spring"] .pxLayer--ground{background-image:url("./assets/layers/ground/ground_spring.jpg")}
+.pxScene[data-season="summer"] .pxLayer--ground{background-image:url("./assets/layers/ground/ground_summer.jpg")}
+.pxScene[data-season="autumn"] .pxLayer--ground{background-image:url("./assets/layers/ground/ground_autumn.jpg")}
+
+.pxScene[data-season="winter"] .pxLayer--horizon{background-image:url("./assets/layers/horizon/horizon_winter.jpg")}
+.pxScene[data-season="spring"] .pxLayer--horizon{background-image:url("./assets/layers/horizon/horizon_spring.jpg")}
+.pxScene[data-season="summer"] .pxLayer--horizon{background-image:url("./assets/layers/horizon/horizon_summer.jpg")}
+.pxScene[data-season="autumn"] .pxLayer--horizon{background-image:url("./assets/layers/horizon/horizon_autumn.jpg")}
+
+.pxScene[data-time="night"] .pxLayer--sky{background-image:url("./assets/layers/sky/sky_night.jpg")}
+.pxScene[data-time="morning"] .pxLayer--sky{background-image:url("./assets/layers/sky/sky_morning.jpg")}
+.pxScene[data-time="day"] .pxLayer--sky{background-image:url("./assets/layers/sky/sky_day.jpg")}
+.pxScene[data-time="evening"] .pxLayer--sky{background-image:url("./assets/layers/sky/sky_evening.jpg")}
+
+/* Clouds (slow, subtle) */
+.pxLayer--clouds{background-image:url("./assets/particles/clouds.jpg"); opacity:.6; background-repeat:repeat; background-size:512px 256px; animation:pxClouds 6s steps(60) infinite}
+@keyframes pxClouds{from{background-position:0 0}to{background-position:-120px 0}}
+
+/* Rain / Snow / Fog overlays */
+.pxScene[data-weather="rain"] .pxLayer--precip{background-image:url("./assets/particles/rain.jpg"); opacity:.55; background-repeat:repeat; background-size:512px 256px; animation:pxRain 3s steps(45) infinite}
+.pxScene[data-weather="storm"] .pxLayer--precip{background-image:url("./assets/particles/rain.jpg"); opacity:.7; background-repeat:repeat; background-size:512px 256px; animation:pxRain 3s steps(45) infinite}
+@keyframes pxRain{from{background-position:0 0}to{background-position:-80px 180px}}
+
+.pxScene[data-weather="snow"] .pxLayer--precip{background-image:url("./assets/particles/snow.jpg"); opacity:.55; background-repeat:repeat; background-size:512px 256px; animation:pxSnow 4s steps(48) infinite}
+@keyframes pxSnow{from{background-position:0 -20px}to{background-position:-24px 140px}}
+
+.pxScene[data-weather="fog"] .pxLayer--fog{background-image:url("./assets/particles/fog.jpg"); opacity:.22; background-repeat:repeat; background-size:512px 256px; animation:pxFog 6s steps(60) infinite}
+@keyframes pxFog{from{background-position:0 0}to{background-position:-24px 0}}
+
+/* Birds (rare blink/travel placeholder). Replace with spriteTravel in JS later if needed. */
+.pxLayer--birds{background-image:url("./assets/particles/birds.jpg"); opacity:0; background-repeat:no-repeat; background-size:256px 128px; background-position:110% 25%; animation:pxBirds 6s steps(60) infinite}
+@keyframes pxBirds{0%{opacity:0; transform:translateX(0)}10%{opacity:.6}20%{opacity:0; transform:translateX(-40px)}100%{opacity:0; transform:translateX(0)}}
+
+/* When canvas engine is active, hide CSS particle layers to avoid double visuals */
+.pxScene.hasCanvas .pxLayer--clouds,
+.pxScene.hasCanvas .pxLayer--precip,
+.pxScene.hasCanvas .pxLayer--fog,
+.pxScene.hasCanvas .pxLayer--birds{display:none}
 .locCard::before{
   content:"";
   position:absolute;
   inset:-40px;
+  z-index:1;
   background: radial-gradient(500px 200px at 20% 20%, rgba(255,255,255,.14), transparent 60%),
               radial-gradient(420px 220px at 70% 60%, rgba(79,140,255,.18), transparent 65%);
   opacity:.8;
   animation: cloudDrift 6s ease-in-out infinite alternate;
 }
-.locCard__row{position:relative; z-index:1; display:flex; align-items:flex-start; justify-content:space-between; gap:10px}
+.locCard__row{position:relative; z-index:4; display:flex; align-items:flex-start; justify-content:space-between; gap:10px}
 .locCard__name{font-size:13px; color:rgba(255,255,255,.75)}
 .locCard__temp{font-size:34px; font-weight:850; line-height:1}
-.locCard__meta{position:relative; z-index:1; margin-top:8px; font-size:12px; color:rgba(255,255,255,.75)}
+.locCard__meta{position:relative; z-index:4; margin-top:8px; font-size:12px; color:rgba(255,255,255,.75)}
 
 .plusCard{
   margin-top:10px;
