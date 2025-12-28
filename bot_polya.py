@@ -6036,8 +6036,12 @@ async def notif_read_cb(c: CallbackQuery):
         pass
     try:
         if c.message:
-            await c.message.delete()
-    except Exception:
+            await c.bot.delete_message(chat_id=int(c.message.chat.id), message_id=int(c.message.message_id))
+    except Exception as e:
+        try:
+            logging.warning(f"notif:read: failed to delete message: {e}")
+        except Exception:
+            pass
         try:
             # убираем кнопку
             await c.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
