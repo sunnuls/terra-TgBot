@@ -15,6 +15,8 @@
   const elErrorText = $("errorText");
 
   const settingsBtn = $("settingsBtn");
+  const notificationsBtn = $("notificationsBtn");
+  const notificationsBadge = $("notificationsBadge");
 
   const weatherCard = $("weatherCard");
   const weatherPlace = $("weatherPlace");
@@ -46,6 +48,8 @@
 
   const toastEl = $("toast");
   const reportViewBody = $("reportViewBody");
+  const notificationsResult = $("notificationsResult");
+  const notificationsList = $("notificationsList");
 
   const screens = {
     dashboard: $("screenDashboard"),
@@ -59,6 +63,7 @@
     weatherLocView: $("screenWeatherLocView"),
     reportView: $("screenReportView"),
     avatarCrop: $("screenAvatarCrop"),
+    notifications: $("screenNotifications"),
   };
   const backBtn = $("backBtn");
 
@@ -119,11 +124,17 @@
   const adminResult = $("adminResult");
   const adminRolesList = $("adminRolesList");
 
+  const exportModal = $("exportModal");
+  const exportModalClose = $("exportModalClose");
+  const exportModalBody = $("exportModalBody");
+  const exportModalBar = $("exportModalBar");
+
   const adminTabRoles = $("adminTabRoles");
   const adminTabLocs = $("adminTabLocs");
   const adminTabCrops = $("adminTabCrops");
   const adminTabActs = $("adminTabActs");
   const adminTabMachines = $("adminTabMachines");
+  const adminTabNotify = $("adminTabNotify");
   const adminSectionRoles = $("adminSectionRoles");
   const adminSectionLocs = $("adminSectionLocs");
   const adminSectionFields = $("adminSectionFields");
@@ -131,6 +142,17 @@
   const adminSectionCrops = $("adminSectionCrops");
   const adminSectionActs = $("adminSectionActs");
   const adminSectionMachines = $("adminSectionMachines");
+  const adminSectionNotify = $("adminSectionNotify");
+
+  const adminNotifyTitle = $("adminNotifyTitle");
+  const adminNotifyBody = $("adminNotifyBody");
+  const adminNotifyRoleUser = $("adminNotifyRoleUser");
+  const adminNotifyRoleBrig = $("adminNotifyRoleBrig");
+  const adminNotifySendAt = $("adminNotifySendAt");
+  const adminNotifySend = $("adminNotifySend");
+  const adminNotifyRefresh = $("adminNotifyRefresh");
+  const adminNotifyResult = $("adminNotifyResult");
+  const adminNotifyScheduled = $("adminNotifyScheduled");
 
   const adminLocsTabFields = $("adminLocsTabFields");
   const adminLocsTabWare = $("adminLocsTabWare");
@@ -186,6 +208,81 @@
     if (!btn) return;
     btn.classList.toggle("btn--active", !!on);
     btn.classList.toggle("btn--secondary", !on);
+  }
+
+  async function refreshNotificationsBadge() {
+    try {
+      if (!notificationsBadge) return;
+      const d = await apiGet("/api/notifications/unread");
+      const n = Number((d && d.count) || 0) || 0;
+      if (n > 0) {
+        notificationsBadge.hidden = false;
+        notificationsBadge.textContent = String(n > 99 ? "99+" : n);
+      } else {
+        notificationsBadge.hidden = true;
+        notificationsBadge.textContent = "";
+      }
+    } catch (e) {
+      // ignore badge errors
+    }
+  }
+
+  function _renderNotifications(items) {
+    if (!notificationsList) return;
+    const list = document.createElement("div");
+    list.className = "list";
+    const arr = items || [];
+    if (!arr.length) {
+      const empty = document.createElement("div");
+      empty.style.fontSize = "13px";
+      empty.style.color = "var(--muted)";
+      empty.textContent = "Нет уведомлений";
+      notificationsList.innerHTML = "";
+      notificationsList.appendChild(empty);
+      return;
+    }
+    for (const it of arr) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "listItem";
+      const isRead = !!it.is_read;
+      const title = String(it.title || "Уведомление");
+      const body = String(it.body || "");
+      const dt = it.sent_at || it.created_at || "";
+      btn.innerHTML = `
+        <div class="listItem__top">
+          <div class="listItem__title">${escapeHtml(title)}${isRead ? "" : " <span style=\"color:rgba(255,93,93,.95)\">●</span>"}</div>
+          <div class="listItem__meta">${escapeHtml(dt ? _fmtDateRu(dt) : "")}</div>
+        </div>
+        <div class="listItem__meta">${escapeHtml(body.length > 140 ? (body.slice(0, 140) + "…") : body)}</div>
+      `;
+      btn.addEventListener("click", async () => {
+        try {
+          hapticTap();
+          await apiPost("/api/notifications/read", { id: Number(it.id) });
+          toast("Прочитано");
+          await openNotifications();
+        } catch (e) {
+          toast("Ошибка", "error");
+        }
+      });
+      list.appendChild(btn);
+    }
+    notificationsList.innerHTML = "";
+    notificationsList.appendChild(list);
+  }
+
+  async function openNotifications() {
+    setScreen("notifications");
+    if (notificationsResult) notificationsResult.textContent = "Загрузка…";
+    try {
+      const d = await apiGet("/api/notifications?limit=80");
+      if (notificationsResult) notificationsResult.textContent = "";
+      _renderNotifications((d && d.items) || []);
+      await refreshNotificationsBadge();
+    } catch (e) {
+      if (notificationsResult) notificationsResult.textContent = _ruApiError(e);
+    }
   }
 
   function _enableListDnD(listEl, onSave) {
@@ -329,11 +426,13 @@
     const isCrops = t === "crops";
     const isActs = t === "acts";
     const isMachines = t === "machines";
+    const isNotify = t === "notify";
     if (adminSectionRoles) adminSectionRoles.hidden = !isRoles;
     if (adminSectionLocs) adminSectionLocs.hidden = !isLocs;
     if (adminSectionCrops) adminSectionCrops.hidden = !isCrops;
     if (adminSectionActs) adminSectionActs.hidden = !isActs;
     if (adminSectionMachines) adminSectionMachines.hidden = !isMachines;
+    if (adminSectionNotify) adminSectionNotify.hidden = !isNotify;
 
     if (adminTabRoles) {
       adminTabRoles.classList.toggle("btn--secondary", !isRoles);
@@ -355,6 +454,10 @@
       adminTabMachines.classList.toggle("btn--secondary", !isMachines);
       adminTabMachines.classList.toggle("btn--active", isMachines);
     }
+    if (adminTabNotify) {
+      adminTabNotify.classList.toggle("btn--secondary", !isNotify);
+      adminTabNotify.classList.toggle("btn--active", isNotify);
+    }
 
     if (isLocs) {
       _adminSetLocsTab(_adminLocsTab);
@@ -370,6 +473,107 @@
     if (isMachines) {
       _adminMachinesSetTab(_adminMachinesTab);
     }
+    if (isNotify) {
+      adminRefreshScheduledNotifications().catch((e) => {
+        if (adminNotifyResult) adminNotifyResult.textContent = _ruApiError(e);
+      });
+    }
+  }
+
+  function _isoFromDatetimeLocal(v) {
+    const s = String(v || "").trim();
+    if (!s) return "";
+    try {
+      const d = new Date(s);
+      if (!Number.isFinite(d.getTime())) return "";
+      return d.toISOString();
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function _renderScheduledNotifications(items) {
+    if (!adminNotifyScheduled) return;
+    const arr = items || [];
+    if (!arr.length) {
+      adminNotifyScheduled.innerHTML = `<div style="font-size:13px; color:var(--muted)">Нет отложенных</div>`;
+      return;
+    }
+
+    const list = document.createElement("div");
+    list.className = "list";
+    for (const it of arr) {
+      const wrap = document.createElement("div");
+      wrap.className = "listItem";
+      wrap.style.cursor = "default";
+      const title = String(it.title || "Уведомление");
+      const body = String(it.body || "");
+      const sendAt = String(it.send_at || "");
+      const roles = String(it.target_roles || "");
+      wrap.innerHTML = `
+        <div class="listItem__top">
+          <div class="listItem__title">${escapeHtml(title)}</div>
+          <div class="listItem__meta">${escapeHtml(sendAt ? _fmtDateRu(sendAt) : "")}</div>
+        </div>
+        <div class="listItem__meta">${escapeHtml(body.length > 160 ? (body.slice(0, 160) + "…") : body)}</div>
+        <div class="listItem__meta">Роли: ${escapeHtml(roles || "—")}</div>
+        <div style="display:flex; gap:8px; margin-top:10px;">
+          <button class="btn btn--secondary" type="button">Изменить</button>
+          <button class="btn btn--secondary" type="button">Удалить</button>
+        </div>
+      `;
+
+      const btns = wrap.querySelectorAll("button");
+      const editBtn = btns && btns[0] ? btns[0] : null;
+      const delBtn = btns && btns[1] ? btns[1] : null;
+
+      if (editBtn) {
+        editBtn.addEventListener("click", async () => {
+          try {
+            const nextBody = prompt("Новый текст уведомления", body);
+            if (nextBody === null) return;
+            const nextSend = prompt("Новая дата ISO (пример: 2025-12-28T16:00:00) или пусто", sendAt);
+            if (nextSend === null) return;
+            await apiPatch(`/api/admin/notifications/${encodeURIComponent(String(it.id))}`, {
+              body: String(nextBody || "").trim(),
+              send_at: String(nextSend || "").trim() || null,
+            });
+            toast("Сохранено");
+            hapticTap();
+            await adminRefreshScheduledNotifications();
+          } catch (e) {
+            toast("Ошибка", "error");
+            if (adminNotifyResult) adminNotifyResult.textContent = _ruApiError(e);
+          }
+        });
+      }
+
+      if (delBtn) {
+        delBtn.addEventListener("click", async () => {
+          try {
+            const ok = confirm("Удалить отложенное уведомление?");
+            if (!ok) return;
+            await apiDelete(`/api/admin/notifications/${encodeURIComponent(String(it.id))}`);
+            toast("Удалено");
+            hapticTap();
+            await adminRefreshScheduledNotifications();
+          } catch (e) {
+            toast("Ошибка", "error");
+            if (adminNotifyResult) adminNotifyResult.textContent = _ruApiError(e);
+          }
+        });
+      }
+
+      list.appendChild(wrap);
+    }
+    adminNotifyScheduled.innerHTML = "";
+    adminNotifyScheduled.appendChild(list);
+  }
+
+  async function adminRefreshScheduledNotifications() {
+    if (adminNotifyResult) adminNotifyResult.textContent = "";
+    const d = await apiGet("/api/admin/notifications/scheduled");
+    _renderScheduledNotifications((d && d.items) || []);
   }
 
   function _adminSetLocsTab(tab) {
@@ -763,6 +967,16 @@
     }
   }
 
+  function _fmtDateRu(iso) {
+    try {
+      const d = new Date(String(iso || ""));
+      if (!Number.isFinite(d.getTime())) return String(iso || "");
+      return d.toLocaleDateString("ru-RU", { year: "numeric", month: "2-digit", day: "2-digit" });
+    } catch (e) {
+      return String(iso || "");
+    }
+  }
+
   let _toastTimer = null;
   function toast(text, kind) {
     if (!toastEl) return;
@@ -783,16 +997,72 @@
 
   function hapticTap() {
     try {
-      if (tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred) tg.HapticFeedback.impactOccurred("light");
+      if (tg && tg.HapticFeedback && typeof tg.HapticFeedback.impactOccurred === "function") tg.HapticFeedback.impactOccurred("light");
     } catch (e) {}
   }
 
-  function _fmtDateRu(iso) {
+  let _exportPollTimer = null;
+  let _exportLastState = "";
+  function _exportModalSet(open) {
+    if (!exportModal) return;
+    exportModal.hidden = !open;
+  }
+
+  function _exportModalRender(st) {
+    if (!exportModalBody || !exportModalBar) return;
+    const state = String((st && st.state) || "idle");
+    const phase = String((st && st.phase) || "");
+    const cur = Number((st && st.current) || 0) || 0;
+    const total = Number((st && st.total) || 0) || 0;
+    const msg = String((st && st.message) || "");
+    const err = String((st && st.error) || "");
+
+    let title = "Статус: " + state;
+    if (phase) title += `, этап: ${phase}`;
+    let line2 = "";
+    if (total > 0) line2 = `Прогресс: ${cur}/${total}`;
+    else if (cur > 0) line2 = `Выполнено: ${cur}`;
+    let line3 = msg ? `Сообщение: ${msg}` : "";
+    let line4 = err ? `Ошибка: ${err}` : "";
+
+    exportModalBody.textContent = [title, line2, line3, line4].filter(Boolean).join("\n");
+
+    const pct = total > 0 ? Math.max(0, Math.min(100, Math.round((cur / total) * 100))) : 0;
+    exportModalBar.style.width = pct + "%";
+  }
+
+  async function _exportPollOnce() {
     try {
-      const d = new Date(String(iso || "") + "T00:00:00");
-      return d.toLocaleDateString("ru-RU", { year: "numeric", month: "2-digit", day: "2-digit" });
+      const st = await apiGet("/api/admin/export/status");
+      _exportModalRender(st);
+      const state = String((st && st.state) || "idle");
+      if (_exportLastState !== state) _exportLastState = state;
+      if (state === "done") {
+        _exportStopPolling();
+        toast("Отчёт экспортирован");
+        hapticTap();
+      } else if (state === "error") {
+        _exportStopPolling();
+        toast("Ошибка экспорта", "error");
+      }
     } catch (e) {
-      return String(iso || "");
+      _exportModalRender({ state: "error", error: _ruApiError(e) });
+      _exportStopPolling();
+      toast("Ошибка экспорта", "error");
+    }
+  }
+
+  function _exportStartPolling() {
+    _exportStopPolling();
+    _exportLastState = "";
+    _exportPollTimer = setInterval(_exportPollOnce, 1000);
+    _exportPollOnce();
+  }
+
+  function _exportStopPolling() {
+    if (_exportPollTimer) {
+      clearInterval(_exportPollTimer);
+      _exportPollTimer = null;
     }
   }
 
@@ -2569,6 +2839,10 @@
       try {
         await refreshDashboardStats();
       } catch (e) {}
+
+      try {
+        await refreshNotificationsBadge();
+      } catch (e) {}
       return data;
     } catch (e) {
       otdResult.textContent = _ruApiError(e);
@@ -2743,6 +3017,10 @@
           });
           return;
         }
+        if (action === "notifications") {
+          openNotifications().catch(() => setScreen("notifications"));
+          return;
+        }
       });
 
       elActions.appendChild(btn);
@@ -2787,6 +3065,10 @@
       } catch (e) {}
 
       try {
+        await refreshNotificationsBadge();
+      } catch (e) {}
+
+      try {
         await refreshWeather();
         setInterval(() => {
           refreshWeather().catch(() => {});
@@ -2800,18 +3082,22 @@
             openWeatherLocations().catch(() => setScreen("weatherLocations"));
             return;
           }
-          if (state.screen === "weatherLocations") {
+          if (state.screen === "notifications") {
             setScreen("dashboard");
+            return;
+          }
+          if (state.screen === "reportView") {
+            setScreen("stats");
             return;
           }
           setScreen("dashboard");
         });
       }
 
-      if (settingsBtn) {
-        settingsBtn.addEventListener("click", () => {
-          setScreen("settings");
-          setAvatar((elFullName && elFullName.textContent) || "");
+      if (notificationsBtn) {
+        notificationsBtn.addEventListener("click", () => {
+          hapticTap();
+          openNotifications().catch(() => setScreen("notifications"));
         });
       }
 
@@ -3001,10 +3287,20 @@
             toast("Экспорт запланирован");
             hapticTap();
             if (adminResult) adminResult.textContent = (r && r.status) ? `Статус: ${r.status}` : "";
+            _exportModalSet(true);
+            _exportModalRender({ state: "queued", message: "Ожидайте..." });
+            _exportStartPolling();
           } catch (e) {
             toast("Ошибка", "error");
             if (adminResult) adminResult.textContent = String(e.message || e);
           }
+        });
+      }
+
+      if (exportModalClose) {
+        exportModalClose.addEventListener("click", () => {
+          _exportStopPolling();
+          _exportModalSet(false);
         });
       }
 
@@ -3037,6 +3333,58 @@
         adminTabMachines.addEventListener("click", () => {
           hapticTap();
           _adminSetTab("machines");
+        });
+      }
+      if (adminTabNotify) {
+        adminTabNotify.addEventListener("click", () => {
+          hapticTap();
+          _adminSetTab("notify");
+        });
+      }
+
+      if (adminNotifyRefresh) {
+        adminNotifyRefresh.addEventListener("click", () => {
+          hapticTap();
+          adminRefreshScheduledNotifications().catch((e) => {
+            if (adminNotifyResult) adminNotifyResult.textContent = _ruApiError(e);
+          });
+        });
+      }
+
+      if (adminNotifySend) {
+        adminNotifySend.addEventListener("click", async () => {
+          try {
+            if (adminNotifyResult) adminNotifyResult.textContent = "";
+            const title = adminNotifyTitle ? String(adminNotifyTitle.value || "").trim() : "";
+            const body = adminNotifyBody ? String(adminNotifyBody.value || "").trim() : "";
+            const roles = [];
+            if (adminNotifyRoleUser && adminNotifyRoleUser.checked) roles.push("user");
+            if (adminNotifyRoleBrig && adminNotifyRoleBrig.checked) roles.push("brigadier");
+            const sendAtIso = adminNotifySendAt ? _isoFromDatetimeLocal(adminNotifySendAt.value) : "";
+            if (!body) {
+              if (adminNotifyResult) adminNotifyResult.textContent = "Введите текст";
+              return;
+            }
+            if (!roles.length) {
+              if (adminNotifyResult) adminNotifyResult.textContent = "Выберите роли";
+              return;
+            }
+            await apiPost("/api/admin/notifications", {
+              title,
+              body,
+              roles,
+              send_at: sendAtIso || null,
+            });
+            toast(sendAtIso ? "Отложено" : "Отправлено");
+            hapticTap();
+            if (adminNotifyBody) adminNotifyBody.value = "";
+            if (adminNotifyTitle) adminNotifyTitle.value = "";
+            if (adminNotifySendAt) adminNotifySendAt.value = "";
+            await adminRefreshScheduledNotifications();
+          } catch (e) {
+            toast("Ошибка", "error");
+            if (adminNotifyResult) adminNotifyResult.textContent = _ruApiError(e);
+          }
         });
       }
 

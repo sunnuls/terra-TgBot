@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+import threading
 import html
 import json
 import os
@@ -534,6 +535,104 @@ async def api_get_dictionaries(request: web.Request) -> web.StreamResponse:
     return web.json_response(svc_dictionaries())
 
 
+async def _deliver_notification_to_user(bot: Bot, *, notification_id: int, user_id: int, title: str, body: str) -> bool:
+    chat_id = get_user_last_chat_id(user_id)
+    if not chat_id:
+        return False
+    text = ""
+    if title:
+        text += f"<b>{html.escape(str(title))}</b>\n\n"
+    text += html.escape(str(body or ""))
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="✅ Прочитано", callback_data=f"notif:read:{int(notification_id)}")]]
+    )
+    try:
+        msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+    except Exception:
+        return False
+    try:
+        now = datetime.now().isoformat()
+        with connect() as con, closing(con.cursor()) as c:
+            c.execute(
+                """
+                INSERT OR IGNORE INTO notification_deliveries(notification_id, user_id, chat_id, message_id, delivered_at)
+                VALUES(?,?,?,?,?)
+                """,
+                (int(notification_id), int(user_id), int(chat_id), int(getattr(msg, "message_id", 0) or 0), now),
+            )
+            con.commit()
+    except Exception:
+        pass
+    return True
+
+
+async def _notifications_worker(bot: Bot) -> None:
+    """Фоновая доставка уведомлений (немедленных и отложенных)"""
+    await asyncio.sleep(2)
+    while True:
+        try:
+            now = datetime.now().isoformat()
+            with connect() as con, closing(con.cursor()) as c:
+                rows = c.execute(
+                    """
+                    SELECT id, title, body, target_roles, send_at, status
+                    FROM notifications
+                    WHERE (status='ready' AND (sent_at IS NULL OR sent_at=''))
+                       OR (status='pending' AND send_at IS NOT NULL AND send_at <= ?)
+                    ORDER BY COALESCE(send_at, created_at) ASC, id ASC
+                    LIMIT 20
+                    """,
+                    (now,),
+                ).fetchall() or []
+
+            for r in rows:
+                nid = int(r[0])
+                title = str(r[1] or "")
+                body = str(r[2] or "")
+                roles = _roles_from_csv(str(r[3] or ""))
+                user_ids = list_user_ids_for_roles(roles)
+
+                delivered_any = False
+                for uid in user_ids:
+                    ok = await _deliver_notification_to_user(bot, notification_id=nid, user_id=int(uid), title=title, body=body)
+                    delivered_any = delivered_any or bool(ok)
+
+                with connect() as con, closing(con.cursor()) as c:
+                    # даже если доставить некому (нет last_chat_id) — считаем отправленным в приложение
+                    c.execute(
+                        "UPDATE notifications SET status='sent', sent_at=? WHERE id=?",
+                        (datetime.now().isoformat(), nid),
+                    )
+                    con.commit()
+
+                # не спамим цикл
+                await asyncio.sleep(0.05)
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+
+
+@router.callback_query(F.data.startswith("notif:read:"))
+async def notif_read_cb(c: CallbackQuery):
+    try:
+        parts = (c.data or "").split(":")
+        nid = int(parts[-1])
+    except Exception:
+        await c.answer("Ошибка", show_alert=True)
+        return
+    try:
+        init_db()
+        mark_notification_read(int(c.from_user.id), int(nid))
+    except Exception:
+        pass
+    try:
+        # убираем кнопку
+        await c.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
+    except Exception:
+        pass
+    await c.answer("Отмечено")
+
+
 async def api_post_report(request: web.Request) -> web.StreamResponse:
     init_data = _request_init_data(request)
     try:
@@ -1041,7 +1140,42 @@ def _admin_reorder_simple(table: str, ids: List[int], *, where_sql: str = "", wh
             c.execute(f"UPDATE {table} SET pos=? WHERE id=?", (pos, i))
             pos += 1
         con.commit()
-        return True
+
+
+def update_user_last_chat_id(user_id: int, chat_id: Optional[int]) -> None:
+    try:
+        cid = int(chat_id) if chat_id is not None else None
+    except Exception:
+        cid = None
+    with connect() as con, closing(con.cursor()) as c:
+        try:
+            c.execute("UPDATE users SET last_chat_id=? WHERE user_id=?", (cid, int(user_id)))
+            con.commit()
+        except Exception:
+            pass
+
+
+def get_user_last_chat_id(user_id: int) -> Optional[int]:
+    try:
+        with connect() as con, closing(con.cursor()) as c:
+            r = c.execute("SELECT last_chat_id FROM users WHERE user_id=?", (int(user_id),)).fetchone()
+        if not r:
+            return None
+        return int(r[0]) if r[0] is not None else None
+    except Exception:
+        return None
+
+
+def _maybe_update_last_chat_id(message: Message) -> None:
+    try:
+        if not message or not message.from_user or not message.chat:
+            return
+        # сохраняем только личный чат, чтобы уведомления приходили в личку
+        if getattr(message.chat, "type", None) != "private":
+            return
+        update_user_last_chat_id(int(message.from_user.id), int(message.chat.id))
+    except Exception:
+        pass
 
 
 def _admin_reorder_crops(rowids: List[int]) -> bool:
@@ -1604,12 +1738,25 @@ async def api_admin_export_post(request: web.Request) -> web.StreamResponse:
     if denied:
         return denied
 
+    _export_status_queue(reason="api:admin:export")
+
     # запускаем экспорт в фоне (через дебаунсер/lock), не блокируем ответ
     try:
         await request_export_soon(otd=True, brig=True, reason="api:admin:export")
     except Exception:
         pass
     return web.json_response({"ok": True, "status": "scheduled"})
+
+
+async def api_admin_export_status_get(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    return web.json_response(_export_status_snapshot())
 
 
 TZ = os.getenv("TZ", "Europe/Moscow").strip()
@@ -1679,7 +1826,7 @@ def _extract_drive_folder_id(value: str) -> str:
 
 # Google Sheets настройки
 GOOGLE_SCOPES = [
-    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 OAUTH_CLIENT_JSON = os.getenv("OAUTH_CLIENT_JSON", "oauth_client.json")
@@ -1879,6 +2026,11 @@ def init_db():
           created_at TEXT
         )
         """)
+
+        # миграция users.last_chat_id (нужно для доставки уведомлений в личку)
+        ucols = table_cols("users")
+        if "last_chat_id" not in ucols:
+            c.execute("ALTER TABLE users ADD COLUMN last_chat_id INTEGER")
         c.execute("""
         CREATE TABLE IF NOT EXISTS activities(
           id    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2098,6 +2250,41 @@ def init_db():
           workers    INTEGER,
           work_date  TEXT,
           created_at TEXT
+        )
+        """)
+
+        # уведомления (для приложения и бота)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS notifications(
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind          TEXT,
+          title         TEXT,
+          body          TEXT,
+          target_roles  TEXT,
+          created_by    INTEGER,
+          created_at    TEXT,
+          send_at       TEXT,
+          sent_at       TEXT,
+          status        TEXT
+        )
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS notification_reads(
+          notification_id INTEGER,
+          user_id         INTEGER,
+          read_at         TEXT,
+          PRIMARY KEY (notification_id, user_id)
+        )
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS notification_deliveries(
+          id              INTEGER PRIMARY KEY AUTOINCREMENT,
+          notification_id INTEGER,
+          user_id         INTEGER,
+          chat_id         INTEGER,
+          message_id      INTEGER,
+          delivered_at    TEXT,
+          UNIQUE(notification_id, user_id)
         )
         """)
 
@@ -2551,6 +2738,313 @@ def get_role_label(user_id: int) -> str:
     if is_brigadier(user_id, uname):
         return "brigadier"
     return "user"
+
+
+def _roles_from_csv(s: str) -> List[str]:
+    parts = [p.strip().lower() for p in str(s or "").split(",")]
+    return [p for p in parts if p]
+
+
+def _user_is_role(user_id: int, role: str) -> bool:
+    r = (role or "").strip().lower()
+    if not r:
+        return False
+    return get_role_label(user_id) == r
+
+
+def list_user_ids_for_roles(roles: List[str]) -> List[int]:
+    want = {str(r or "").strip().lower() for r in (roles or []) if str(r or "").strip()}
+    if not want:
+        return []
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute("SELECT user_id FROM users").fetchall() or []
+    out: List[int] = []
+    for r in rows:
+        try:
+            uid = int(r[0])
+        except Exception:
+            continue
+        try:
+            if get_role_label(uid) in want:
+                out.append(uid)
+        except Exception:
+            continue
+    return out
+
+
+def create_notification(*, kind: str, title: str, body: str, target_roles: List[str], created_by: Optional[int], send_at: Optional[str]) -> int:
+    now = datetime.now().isoformat()
+    roles_csv = ",".join([r for r in (target_roles or []) if r])
+    status = "pending" if (send_at and str(send_at).strip()) else "ready"
+    with connect() as con, closing(con.cursor()) as c:
+        cur = c.execute(
+            """
+            INSERT INTO notifications(kind, title, body, target_roles, created_by, created_at, send_at, sent_at, status)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (kind, title, body, roles_csv, created_by, now, send_at, None, status),
+        )
+        con.commit()
+        return int(cur.lastrowid)
+
+
+def list_notifications_for_user(user_id: int, *, limit: int = 50) -> List[dict]:
+    limit = max(1, min(200, int(limit or 50)))
+    role = get_role_label(user_id)
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute(
+            """
+            SELECT n.id, n.kind, n.title, n.body, n.created_at, n.send_at, n.sent_at, n.status,
+                   CASE WHEN r.read_at IS NULL THEN 0 ELSE 1 END as is_read,
+                   r.read_at
+            FROM notifications n
+            LEFT JOIN notification_reads r
+              ON r.notification_id = n.id AND r.user_id = ?
+            WHERE n.status IN ('ready','sent')
+              AND (n.target_roles IS NULL OR n.target_roles='' OR (',' || LOWER(n.target_roles) || ',') LIKE ('%,' || ? || ',%'))
+            ORDER BY COALESCE(n.sent_at, n.created_at) DESC, n.id DESC
+            LIMIT ?
+            """,
+            (user_id, role, limit),
+        ).fetchall() or []
+    items = []
+    for r in rows:
+        items.append(
+            {
+                "id": int(r[0]),
+                "kind": r[1],
+                "title": r[2],
+                "body": r[3],
+                "created_at": r[4],
+                "send_at": r[5],
+                "sent_at": r[6],
+                "status": r[7],
+                "is_read": bool(r[8]),
+                "read_at": r[9],
+            }
+        )
+    return items
+
+
+def notifications_unread_count(user_id: int) -> int:
+    role = get_role_label(user_id)
+    with connect() as con, closing(con.cursor()) as c:
+        row = c.execute(
+            """
+            SELECT COUNT(1)
+            FROM notifications n
+            LEFT JOIN notification_reads r
+              ON r.notification_id = n.id AND r.user_id = ?
+            WHERE n.status IN ('ready','sent')
+              AND r.read_at IS NULL
+              AND (n.target_roles IS NULL OR n.target_roles='' OR (',' || LOWER(n.target_roles) || ',') LIKE ('%,' || ? || ',%'))
+            """,
+            (user_id, role),
+        ).fetchone()
+    try:
+        return int(row[0] or 0) if row else 0
+    except Exception:
+        return 0
+
+
+def mark_notification_read(user_id: int, notification_id: int) -> bool:
+    now = datetime.now().isoformat()
+    with connect() as con, closing(con.cursor()) as c:
+        c.execute(
+            """
+            INSERT INTO notification_reads(notification_id, user_id, read_at)
+            VALUES(?,?,?)
+            ON CONFLICT(notification_id, user_id) DO UPDATE SET read_at=excluded.read_at
+            """,
+            (notification_id, user_id, now),
+        )
+        con.commit()
+    return True
+
+
+async def api_notifications_get(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    limit = _as_int(request.query.get("limit"), 50)
+    items = list_notifications_for_user(int(ctx["user_id"]), limit=limit)
+    return web.json_response({"items": items})
+
+
+async def api_notifications_unread_get(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    cnt = notifications_unread_count(int(ctx["user_id"]))
+    return web.json_response({"count": int(cnt)})
+
+
+async def api_notifications_read_post(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    nid = _as_int((payload or {}).get("id"), 0)
+    if nid <= 0:
+        return web.json_response({"error": "missing:id"}, status=422)
+    mark_notification_read(int(ctx["user_id"]), nid)
+    return web.json_response({"ok": True})
+
+
+async def api_admin_notifications_post(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+
+    title = str((payload or {}).get("title") or "").strip()
+    body = str((payload or {}).get("body") or "").strip()
+    roles = (payload or {}).get("roles") or []
+    if isinstance(roles, str):
+        roles = _roles_from_csv(roles)
+    roles = [str(r or "").strip().lower() for r in (roles or []) if str(r or "").strip()]
+    allowed_roles = {"user", "brigadier"}
+    roles = [r for r in roles if r in allowed_roles]
+    send_at = str((payload or {}).get("send_at") or "").strip() or None
+    if not body:
+        return web.json_response({"error": "missing:body"}, status=422)
+    if not roles:
+        return web.json_response({"error": "missing:roles"}, status=422)
+
+    nid = create_notification(
+        kind="admin",
+        title=title or "Уведомление",
+        body=body,
+        target_roles=roles,
+        created_by=int(ctx["user_id"]),
+        send_at=send_at,
+    )
+    return web.json_response({"ok": True, "id": int(nid)})
+
+
+async def api_admin_notifications_scheduled_get(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute(
+            """
+            SELECT id, kind, title, body, target_roles, created_by, created_at, send_at, status
+            FROM notifications
+            WHERE status='pending'
+            ORDER BY send_at ASC, id ASC
+            LIMIT 200
+            """
+        ).fetchall() or []
+    items = [
+        {
+            "id": int(r[0]),
+            "kind": r[1],
+            "title": r[2],
+            "body": r[3],
+            "target_roles": r[4],
+            "created_by": int(r[5]) if r[5] is not None else None,
+            "created_at": r[6],
+            "send_at": r[7],
+            "status": r[8],
+        }
+        for r in rows
+    ]
+    return web.json_response({"items": items})
+
+
+async def api_admin_notifications_patch(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    init_data = (payload or {}).get("initData") or init_data
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+
+    nid = _as_int(request.match_info.get("notification_id"), 0)
+    if nid <= 0:
+        return web.json_response({"error": "bad id"}, status=404)
+
+    title = (payload or {}).get("title")
+    body = (payload or {}).get("body")
+    roles = (payload or {}).get("roles")
+    send_at = (payload or {}).get("send_at")
+    sets = []
+    vals: List[object] = []
+    if title is not None:
+        sets.append("title=?")
+        vals.append(str(title))
+    if body is not None:
+        sets.append("body=?")
+        vals.append(str(body))
+    if roles is not None:
+        if isinstance(roles, str):
+            allowed_roles = {"user", "brigadier"}
+            roles_csv = ",".join([r for r in _roles_from_csv(roles) if r in allowed_roles])
+        else:
+            allowed_roles = {"user", "brigadier"}
+            roles_csv = ",".join(
+                [
+                    str(r or "").strip().lower()
+                    for r in (roles or [])
+                    if str(r or "").strip() and str(r or "").strip().lower() in allowed_roles
+                ]
+            )
+        sets.append("target_roles=?")
+        vals.append(roles_csv)
+    if send_at is not None:
+        sets.append("send_at=?")
+        vals.append(str(send_at) or None)
+    if not sets:
+        return web.json_response({"ok": True})
+    vals.append(nid)
+    with connect() as con, closing(con.cursor()) as c:
+        c.execute(f"UPDATE notifications SET {', '.join(sets)} WHERE id=? AND status='pending'", tuple(vals))
+        con.commit()
+    return web.json_response({"ok": True})
+
+
+async def api_admin_notifications_delete(request: web.Request) -> web.StreamResponse:
+    init_data = _request_init_data(request)
+    ctx, err = _web_require_auth(request, init_data=init_data)
+    if err:
+        return err
+    denied = _web_require_admin(ctx)
+    if denied:
+        return denied
+
+    nid = _as_int(request.match_info.get("notification_id"), 0)
+    if nid <= 0:
+        return web.json_response({"error": "bad id"}, status=404)
+    with connect() as con, closing(con.cursor()) as c:
+        cur = c.execute("DELETE FROM notifications WHERE id=? AND status='pending'", (nid,))
+        con.commit()
+    return web.json_response({"ok": cur.rowcount > 0})
 
 def list_activities(grp: str) -> List[str]:
     with connect() as con, closing(con.cursor()) as c:
@@ -3492,7 +3986,8 @@ def get_or_create_monthly_sheet(year: int, month: int):
             def create_file():
                 return drive.files().create(
                     body=file_metadata,
-                    fields="id, webViewLink"
+                    fields="id, webViewLink",
+                    supportsAllDrives=True,
                 ).execute()
             
             file = retry_google_api_call(create_file)
@@ -3606,7 +4101,8 @@ def get_or_create_brig_monthly_sheet(year: int, month: int):
             def create_file():
                 return drive.files().create(
                     body=file_metadata,
-                    fields="id, webViewLink"
+                    fields="id, webViewLink",
+                    supportsAllDrives=True,
                 ).execute()
 
             file = retry_google_api_call(create_file)
@@ -3750,6 +4246,8 @@ def export_brigadier_reports_to_sheets():
         all_reports = get_brig_reports_to_export()
         deleted_reports = get_deleted_brig_reports()
 
+        _export_status_set_phase("brig", total=(len(all_reports) + len(deleted_reports)))
+
         if not all_reports and not deleted_reports:
             return 0, "Нет бригадирских отчетов для экспорта"
 
@@ -3805,6 +4303,7 @@ def export_brigadier_reports_to_sheets():
                         )
                         con.commit()
                     total_deleted += 1
+                    _export_status_tick(message="Бригадиры: удаление")
                 except Exception as e:
                     logging.error(f"Error deleting brig report {report_id}: {e}")
 
@@ -3820,7 +4319,7 @@ def export_brigadier_reports_to_sheets():
                 new_name = f"{BRIG_EXPORT_PREFIX} - {month_names[month]} {year}"
 
                 def update_sheet_name():
-                    return drive.files().update(fileId=spreadsheet_id, body={"name": new_name}).execute()
+                    return drive.files().update(fileId=spreadsheet_id, body={"name": new_name}, supportsAllDrives=True).execute()
 
                 retry_google_api_call(update_sheet_name)
             except Exception:
@@ -3872,6 +4371,7 @@ def export_brigadier_reports_to_sheets():
                             )
                             con.commit()
                         total_updated += 1
+                        _export_status_tick(message="Бригадиры: обновление")
                     except Exception as e:
                         logging.error(f"Error updating brig report {rid}: {e}")
                 else:
@@ -3894,6 +4394,7 @@ def export_brigadier_reports_to_sheets():
                             con.commit()
                         total_exported += 1
                         next_row += 1
+                        _export_status_tick(message="Бригадиры: добавление")
                     except Exception as e:
                         logging.error(f"Error adding brig report {rid}: {e}")
 
@@ -3935,6 +4436,8 @@ def export_reports_to_sheets():
         # Получаем все отчеты для экспорта
         all_reports = get_reports_to_export()
         deleted_reports = get_deleted_reports()
+
+        _export_status_set_phase("otd", total=(len(all_reports) + len(deleted_reports)))
         
         if not all_reports and not deleted_reports:
             logging.info("No reports to export")
@@ -4001,6 +4504,7 @@ def export_reports_to_sheets():
                     
                     total_deleted += 1
                     logging.info(f"Deleted report {report_id} from sheet")
+                    _export_status_tick(message="ОТД: удаление")
                     
                 except Exception as e:
                     logging.error(f"Error deleting report {report_id}: {e}")
@@ -4022,7 +4526,8 @@ def export_reports_to_sheets():
                 def update_sheet_name():
                     return drive.files().update(
                         fileId=spreadsheet_id,
-                        body={"name": new_name}
+                        body={"name": new_name},
+                        supportsAllDrives=True,
                     ).execute()
                 
                 retry_google_api_call(update_sheet_name)
@@ -4074,6 +4579,7 @@ def export_reports_to_sheets():
                         
                         total_updated += 1
                         logging.info(f"Updated report {report_id} in sheet")
+                        _export_status_tick(message="ОТД: обновление")
                         
                     except Exception as e:
                         logging.error(f"Error updating report {report_id}: {e}")
@@ -4102,6 +4608,7 @@ def export_reports_to_sheets():
                         total_exported += 1
                         next_row += 1
                         logging.info(f"Added new report {report_id} to sheet")
+                        _export_status_tick(message="ОТД: добавление")
                         
                     except Exception as e:
                         logging.error(f"Error adding report {report_id}: {e}")
@@ -5806,6 +6313,7 @@ async def cmd_start(message: Message, state: FSMContext):
         if u0 and (u0.get("full_name") or "").strip() and _has_phone(u0):
             return
     init_db()
+    _maybe_update_last_chat_id(message)
     u = get_user(message.from_user.id)
     if not u:
         upsert_user(message.from_user.id, None, TZ, message.from_user.username or "")
@@ -5858,6 +6366,7 @@ async def auto_register_on_any_text(message: Message, state: FSMContext):
     # если пользователь уже зарегистрирован — ничего не делаем
     u = get_user(message.from_user.id) or {}
     if (u.get("full_name") or "").strip() and _has_phone(u):
+        _maybe_update_last_chat_id(message)
         return
 
     init_db()
@@ -11012,6 +11521,7 @@ async def any_text(message: Message):
     # В запрещённых темах/чате не реагируем (чтобы в группе были только отчёты)
     if not _is_allowed_topic(message):
         return
+    _maybe_update_last_chat_id(message)
     u = get_user(message.from_user.id)
     await show_main_menu(message.chat.id, message.from_user.id, u, "Меню")
 
@@ -11040,6 +11550,7 @@ def _webapp_actions_for_role(role: str) -> List[dict]:
             {"action": "brig_report", "title": "ОБ", "hint": "отчет бригадира"},
             {"action": "otd", "title": "ОТД", "hint": "добавить часы"},
             {"action": "stats", "title": "Статистика", "hint": "неделя / месяц"},
+            {"action": "notifications", "title": "Уведомления", "hint": ""},
             {"action": "settings", "title": "Настройки", "hint": "ФИО / телефон"},
         ]
     # Admin-group for Mini App: admin + it + tim
@@ -11047,12 +11558,14 @@ def _webapp_actions_for_role(role: str) -> List[dict]:
         return [
             {"action": "otd", "title": "ОТД", "hint": "добавить часы"},
             {"action": "stats", "title": "Статистика", "hint": "неделя / месяц"},
+            {"action": "notifications", "title": "Уведомления", "hint": ""},
             {"action": "settings", "title": "Настройки", "hint": "ФИО / телефон"},
             {"action": "admin", "title": "Админ", "hint": "роли / экспорт"},
         ]
     return [
         {"action": "otd", "title": "ОТД", "hint": "добавить часы"},
         {"action": "stats", "title": "Статистика", "hint": "неделя / месяц"},
+        {"action": "notifications", "title": "Уведомления", "hint": ""},
         {"action": "settings", "title": "Настройки", "hint": "ФИО / телефон"},
     ]
 
@@ -11387,6 +11900,15 @@ async def _start_webapp_server() -> Optional[web.AppRunner]:
     app.router.add_delete("/api/admin/machine/items/{item_id}", api_admin_machine_items_delete)
     app.router.add_post("/api/admin/machine/items/reorder", api_admin_machine_items_reorder)
     app.router.add_post("/api/admin/export", api_admin_export_post)
+    app.router.add_get("/api/admin/export/status", api_admin_export_status_get)
+
+    app.router.add_get("/api/notifications", api_notifications_get)
+    app.router.add_get("/api/notifications/unread", api_notifications_unread_get)
+    app.router.add_post("/api/notifications/read", api_notifications_read_post)
+    app.router.add_post("/api/admin/notifications", api_admin_notifications_post)
+    app.router.add_get("/api/admin/notifications/scheduled", api_admin_notifications_scheduled_get)
+    app.router.add_patch("/api/admin/notifications/{notification_id}", api_admin_notifications_patch)
+    app.router.add_delete("/api/admin/notifications/{notification_id}", api_admin_notifications_delete)
 
     # Backward compatibility (webapp v0)
     app.router.add_post("/api/me", _api_me)
@@ -11414,6 +11936,105 @@ _export_lock = asyncio.Lock()
 _export_task: Optional[asyncio.Task] = None
 _export_last_request_ts: float = 0.0
 _export_pending = {"otd": False, "brig": False}
+
+_export_status_lock = threading.Lock()
+_export_status: Dict[str, object] = {
+    "state": "idle",  # idle|queued|running|done|error
+    "reason": "",
+    "requested_at": None,
+    "started_at": None,
+    "finished_at": None,
+    "phase": "",  # otd|brig|next_month
+    "current": 0,
+    "total": 0,
+    "message": "",
+    "error": "",
+    "updated_at": None,
+}
+
+
+def _export_status_queue(*, reason: str = "") -> None:
+    now = datetime.now().isoformat()
+    with _export_status_lock:
+        _export_status.update(
+            {
+                "state": "queued",
+                "reason": reason or "",
+                "requested_at": now,
+                "started_at": None,
+                "finished_at": None,
+                "phase": "",
+                "current": 0,
+                "total": 0,
+                "message": "",
+                "error": "",
+                "updated_at": now,
+            }
+        )
+
+
+def _export_status_start(*, reason: str = "") -> None:
+    now = datetime.now().isoformat()
+    with _export_status_lock:
+        _export_status.update(
+            {
+                "state": "running",
+                "reason": reason or _export_status.get("reason") or "",
+                "started_at": now,
+                "finished_at": None,
+                "phase": "",
+                "current": 0,
+                "total": 0,
+                "message": "",
+                "error": "",
+                "updated_at": now,
+            }
+        )
+
+
+def _export_status_set_phase(*, phase: str, total: int = 0) -> None:
+    now = datetime.now().isoformat()
+    with _export_status_lock:
+        _export_status["phase"] = phase
+        _export_status["current"] = 0
+        _export_status["total"] = int(total or 0)
+        _export_status["updated_at"] = now
+
+
+def _export_status_tick(*, inc: int = 1, message: str = "") -> None:
+    now = datetime.now().isoformat()
+    with _export_status_lock:
+        try:
+            _export_status["current"] = int(_export_status.get("current") or 0) + int(inc or 0)
+        except Exception:
+            _export_status["current"] = 0
+        if message:
+            _export_status["message"] = message
+        _export_status["updated_at"] = now
+
+
+def _export_status_done(*, message: str = "") -> None:
+    now = datetime.now().isoformat()
+    with _export_status_lock:
+        _export_status["state"] = "done"
+        _export_status["finished_at"] = now
+        if message:
+            _export_status["message"] = message
+        _export_status["updated_at"] = now
+
+
+def _export_status_error(*, error: str = "") -> None:
+    now = datetime.now().isoformat()
+    with _export_status_lock:
+        _export_status["state"] = "error"
+        _export_status["finished_at"] = now
+        _export_status["error"] = (error or "")[:500]
+        _export_status["updated_at"] = now
+
+
+def _export_status_snapshot() -> Dict[str, object]:
+    with _export_status_lock:
+        return dict(_export_status)
 
 
 async def request_export_soon(*, otd: bool = True, brig: bool = True, reason: str = "") -> None:
@@ -11463,13 +12084,57 @@ async def _export_worker() -> None:
 
         try:
             async with _export_lock:
+                _export_status_start(reason="export_on_change")
                 if do_otd:
                     await asyncio.to_thread(export_reports_to_sheets)
                     await asyncio.to_thread(check_and_create_next_month_sheet)
                 if do_brig:
                     await asyncio.to_thread(export_brigadier_reports_to_sheets)
+                _export_status_done(message="Экспорт завершён")
+
+                try:
+                    st = _export_status_snapshot()
+                    req_at = st.get("requested_at") or ""
+                    fin_at = st.get("finished_at") or datetime.now().isoformat()
+                    body = (
+                        f"Заявка: {req_at}\n"
+                        f"Завершено: {fin_at}\n"
+                        f"Статус: успех"
+                    )
+                    create_notification(
+                        kind="export",
+                        title="Экспорт отчёта",
+                        body=body,
+                        target_roles=["admin"],
+                        created_by=None,
+                        send_at=None,
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             logging.error(f"[export-on-change] export failed: {e}")
+            _export_status_error(error=str(e))
+
+            try:
+                st = _export_status_snapshot()
+                req_at = st.get("requested_at") or ""
+                fin_at = st.get("finished_at") or datetime.now().isoformat()
+                body = (
+                    f"Заявка: {req_at}\n"
+                    f"Завершено: {fin_at}\n"
+                    f"Статус: ошибка\n"
+                    f"Ошибка: {str(e)}"
+                )
+                create_notification(
+                    kind="export",
+                    title="Экспорт отчёта (ошибка)",
+                    body=body,
+                    target_roles=["admin"],
+                    created_by=None,
+                    send_at=None,
+                )
+            except Exception:
+                pass
 
         # если за время экспорта не пришли новые изменения — выходим
         if loop.time() - _export_last_request_ts >= debounce and not _export_pending["otd"] and not _export_pending["brig"]:
@@ -11500,6 +12165,7 @@ async def main():
     init_db()
 
     bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    asyncio.create_task(_notifications_worker(bot), name="notifications_worker")
     dp = Dispatcher()
     dp.include_router(router_topics)  # Роутер модерации тем (должен быть первым)
     dp.include_router(router)
