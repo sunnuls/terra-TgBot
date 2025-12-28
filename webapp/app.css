@@ -23,6 +23,18 @@ body{
   overscroll-behavior-y:none;
 }
 
+input, select, textarea{
+  max-width:100%;
+  min-width:0;
+  box-sizing:border-box;
+}
+
+input[type="datetime-local"]{
+  width:100%;
+  max-width:100%;
+  min-width:0;
+}
+
 .app{min-height:100%; display:flex; flex-direction:column; background:var(--bg)}
 
 .topbar{
