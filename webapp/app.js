@@ -3104,6 +3104,13 @@
         });
       }
 
+      if (settingsBtn) {
+        settingsBtn.addEventListener("click", () => {
+          hapticTap();
+          setScreen("settings");
+        });
+      }
+
       if (weatherCard) {
         weatherCard.addEventListener("click", () => {
           openWeatherLocations().catch(() => setScreen("weatherLocations"));
