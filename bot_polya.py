@@ -12037,6 +12037,22 @@ def _export_status_snapshot() -> Dict[str, object]:
         return dict(_export_status)
 
 
+def _fmt_ddmmyyyy(v: str) -> str:
+    s = str(v or "").strip()
+    if not s:
+        return ""
+    try:
+        d = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return d.strftime("%d,%m,%Y")
+    except Exception:
+        try:
+            # fallback for values like 'YYYY-MM-DDTHH:MM:SS'
+            d = datetime.fromisoformat(s.split(".", 1)[0])
+            return d.strftime("%d,%m,%Y")
+        except Exception:
+            return s
+
+
 async def request_export_soon(*, otd: bool = True, brig: bool = True, reason: str = "") -> None:
     """
     Дебаунсим экспорт в Google Sheets при изменениях в БД:
@@ -12097,8 +12113,8 @@ async def _export_worker() -> None:
                     req_at = st.get("requested_at") or ""
                     fin_at = st.get("finished_at") or datetime.now().isoformat()
                     body = (
-                        f"Заявка: {req_at}\n"
-                        f"Завершено: {fin_at}\n"
+                        f"Заявка: {_fmt_ddmmyyyy(req_at)}\n"
+                        f"Завершено: {_fmt_ddmmyyyy(fin_at)}\n"
                         f"Статус: успех"
                     )
                     create_notification(
@@ -12120,8 +12136,8 @@ async def _export_worker() -> None:
                 req_at = st.get("requested_at") or ""
                 fin_at = st.get("finished_at") or datetime.now().isoformat()
                 body = (
-                    f"Заявка: {req_at}\n"
-                    f"Завершено: {fin_at}\n"
+                    f"Заявка: {_fmt_ddmmyyyy(req_at)}\n"
+                    f"Завершено: {_fmt_ddmmyyyy(fin_at)}\n"
                     f"Статус: ошибка\n"
                     f"Ошибка: {str(e)}"
                 )
