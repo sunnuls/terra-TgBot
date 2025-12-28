@@ -550,6 +550,22 @@ async def _deliver_notification_to_user(bot: Bot, *, notification_id: int, user_
         msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
     except Exception:
         return False
+
+    try:
+        t = (str(title or "") + " " + str(body or "")).lower()
+        if "test" in t:
+            mid = int(getattr(msg, "message_id", 0) or 0)
+            if mid > 0:
+                async def _del_later() -> None:
+                    try:
+                        await asyncio.sleep(30)
+                        await bot.delete_message(chat_id=int(chat_id), message_id=mid)
+                    except Exception:
+                        pass
+                asyncio.create_task(_del_later())
+    except Exception:
+        pass
+
     try:
         now = datetime.now().isoformat()
         with connect() as con, closing(con.cursor()) as c:
@@ -6019,10 +6035,14 @@ async def notif_read_cb(c: CallbackQuery):
     except Exception:
         pass
     try:
-        # убираем кнопку
-        await c.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
+        if c.message:
+            await c.message.delete()
     except Exception:
-        pass
+        try:
+            # убираем кнопку
+            await c.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
+        except Exception:
+            pass
     await c.answer("Отмечено")
 
 # В read-only чате запрещаем обработку ЛЮБЫХ входящих апдейтов обычным роутером:
