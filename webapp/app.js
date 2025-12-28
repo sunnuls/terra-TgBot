@@ -149,6 +149,7 @@
   const adminNotifyRoleUser = $("adminNotifyRoleUser");
   const adminNotifyRoleBrig = $("adminNotifyRoleBrig");
   const adminNotifySendAt = $("adminNotifySendAt");
+  const adminNotifyScheduleBtn = $("adminNotifyScheduleBtn");
   const adminNotifySend = $("adminNotifySend");
   const adminNotifyRefresh = $("adminNotifyRefresh");
   const adminNotifyResult = $("adminNotifyResult");
@@ -208,6 +209,23 @@
     if (!btn) return;
     btn.classList.toggle("btn--active", !!on);
     btn.classList.toggle("btn--secondary", !on);
+  }
+
+  function _isoFromDatetimeLocal(v) {
+    const s = String(v || "").trim();
+    if (!s) return "";
+    return s.length === 16 ? (s + ":00") : s;
+  }
+
+  function _adminNotifyScheduleBtnText() {
+    const v = adminNotifySendAt ? String(adminNotifySendAt.value || "").trim() : "";
+    if (!v) return "Запланировать уведомление";
+    return "Запланировано: " + v.replace("T", " ");
+  }
+
+  function _adminNotifySyncScheduleBtn() {
+    if (!adminNotifyScheduleBtn) return;
+    adminNotifyScheduleBtn.textContent = _adminNotifyScheduleBtnText();
   }
 
   async function refreshNotificationsBadge() {
@@ -480,16 +498,10 @@
     }
   }
 
-  function _isoFromDatetimeLocal(v) {
-    const s = String(v || "").trim();
-    if (!s) return "";
-    try {
-      const d = new Date(s);
-      if (!Number.isFinite(d.getTime())) return "";
-      return d.toISOString();
-    } catch (e) {
-      return "";
-    }
+  async function adminRefreshScheduledNotifications() {
+    if (adminNotifyResult) adminNotifyResult.textContent = "";
+    const d = await apiGet("/api/admin/notifications/scheduled");
+    _renderScheduledNotifications((d && d.items) || []);
   }
 
   function _renderScheduledNotifications(items) {
@@ -3349,7 +3361,37 @@
         adminTabNotify.addEventListener("click", () => {
           hapticTap();
           _adminSetTab("notify");
+          _adminNotifySyncScheduleBtn();
         });
+      }
+
+      if (adminNotifyScheduleBtn && adminNotifySendAt) {
+        adminNotifyScheduleBtn.addEventListener("click", () => {
+          try {
+            hapticTap();
+          } catch (e) {}
+          try {
+            if (typeof adminNotifySendAt.showPicker === "function") {
+              adminNotifySendAt.showPicker();
+            } else {
+              adminNotifySendAt.click();
+              adminNotifySendAt.focus();
+            }
+          } catch (e) {
+            try {
+              adminNotifySendAt.focus();
+            } catch (e2) {}
+          }
+        });
+
+        adminNotifySendAt.addEventListener("change", () => {
+          _adminNotifySyncScheduleBtn();
+        });
+        adminNotifySendAt.addEventListener("input", () => {
+          _adminNotifySyncScheduleBtn();
+        });
+
+        _adminNotifySyncScheduleBtn();
       }
 
       if (adminNotifyRefresh) {
@@ -3390,6 +3432,7 @@
             if (adminNotifyBody) adminNotifyBody.value = "";
             if (adminNotifyTitle) adminNotifyTitle.value = "";
             if (adminNotifySendAt) adminNotifySendAt.value = "";
+            _adminNotifySyncScheduleBtn();
             await adminRefreshScheduledNotifications();
           } catch (e) {
             toast("Ошибка", "error");
