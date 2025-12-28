@@ -3366,24 +3366,6 @@
       }
 
       if (adminNotifyScheduleBtn && adminNotifySendAt) {
-        adminNotifyScheduleBtn.addEventListener("click", () => {
-          try {
-            hapticTap();
-          } catch (e) {}
-          try {
-            if (typeof adminNotifySendAt.showPicker === "function") {
-              adminNotifySendAt.showPicker();
-            } else {
-              adminNotifySendAt.click();
-              adminNotifySendAt.focus();
-            }
-          } catch (e) {
-            try {
-              adminNotifySendAt.focus();
-            } catch (e2) {}
-          }
-        });
-
         adminNotifySendAt.addEventListener("change", () => {
           _adminNotifySyncScheduleBtn();
         });
