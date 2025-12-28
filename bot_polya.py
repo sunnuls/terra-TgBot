@@ -4225,7 +4225,7 @@ def export_brigadier_reports_to_sheets():
         all_reports = get_brig_reports_to_export()
         deleted_reports = get_deleted_brig_reports()
 
-        _export_status_set_phase("brig", total=(len(all_reports) + len(deleted_reports)))
+        _export_status_set_phase(phase="brig", total=(len(all_reports) + len(deleted_reports)))
 
         if not all_reports and not deleted_reports:
             return 0, "Нет бригадирских отчетов для экспорта"
@@ -4391,10 +4391,11 @@ def export_brigadier_reports_to_sheets():
 
     except HttpError as e:
         logging.error(f"Google API error during brig export: {e}")
+        hint = _google_http_error_hint(e)
         em = str(e).lower()
         if "invalid_grant" in em or "expired or revoked" in em:
             return 0, _google_auth_setup_message()
-        return 0, "Ошибка Google API (бригадиры)"
+        return 0, (hint or "Ошибка Google API (бригадиры)")
     except Exception as e:
         logging.error(f"Error during brig export: {e}")
         em = str(e).lower()
@@ -4416,7 +4417,7 @@ def export_reports_to_sheets():
         all_reports = get_reports_to_export()
         deleted_reports = get_deleted_reports()
 
-        _export_status_set_phase("otd", total=(len(all_reports) + len(deleted_reports)))
+        _export_status_set_phase(phase="otd", total=(len(all_reports) + len(deleted_reports)))
         
         if not all_reports and not deleted_reports:
             logging.info("No reports to export")
@@ -4610,10 +4611,11 @@ def export_reports_to_sheets():
         
     except HttpError as e:
         logging.error(f"Google API error during export: {e}")
+        hint = _google_http_error_hint(e)
         em = str(e).lower()
         if "invalid_grant" in em or "expired or revoked" in em:
             return 0, _google_auth_setup_message()
-        return 0, "Ошибка Google API"
+        return 0, (hint or "Ошибка Google API")
     except Exception as e:
         logging.error(f"Error during export: {e}")
         em = str(e).lower()
@@ -12035,6 +12037,37 @@ def _export_status_error(*, error: str = "") -> None:
 def _export_status_snapshot() -> Dict[str, object]:
     with _export_status_lock:
         return dict(_export_status)
+
+
+def _google_http_error_hint(e: Exception) -> str:
+    try:
+        if not isinstance(e, HttpError):
+            return ""
+        raw = getattr(e, "content", None)
+        if not raw:
+            return ""
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", errors="ignore")
+        s = str(raw)
+        try:
+            payload = json.loads(s)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            err = payload.get("error") or {}
+            errors = err.get("errors") or []
+            reason = ""
+            if errors and isinstance(errors, list) and isinstance(errors[0], dict):
+                reason = str(errors[0].get("reason") or "")
+            message = str(err.get("message") or "")
+            if "storageQuotaExceeded" in reason or "storageQuotaExceeded" in message:
+                return "Google Drive: превышена квота хранилища (storageQuotaExceeded). Освободите место или смените аккаунт/диск."
+        text = str(e)
+        if "storageQuotaExceeded" in text:
+            return "Google Drive: превышена квота хранилища (storageQuotaExceeded). Освободите место или смените аккаунт/диск."
+        return ""
+    except Exception:
+        return ""
 
 
 def _fmt_ddmmyyyy(v: str) -> str:
