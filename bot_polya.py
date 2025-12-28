@@ -612,27 +612,6 @@ async def _notifications_worker(bot: Bot) -> None:
         await asyncio.sleep(2)
 
 
-@router.callback_query(F.data.startswith("notif:read:"))
-async def notif_read_cb(c: CallbackQuery):
-    try:
-        parts = (c.data or "").split(":")
-        nid = int(parts[-1])
-    except Exception:
-        await c.answer("Ошибка", show_alert=True)
-        return
-    try:
-        init_db()
-        mark_notification_read(int(c.from_user.id), int(nid))
-    except Exception:
-        pass
-    try:
-        # убираем кнопку
-        await c.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
-    except Exception:
-        pass
-    await c.answer("Отмечено")
-
-
 async def api_post_report(request: web.Request) -> web.StreamResponse:
     init_data = _request_init_data(request)
     try:
@@ -6022,6 +6001,27 @@ async def is_admin_user(bot: Bot, chat_id: int, user_id: int) -> bool:
 
 router = Router()
 router_topics = Router()  # Отдельный роутер для модерации тем
+
+
+@router.callback_query(F.data.startswith("notif:read:"))
+async def notif_read_cb(c: CallbackQuery):
+    try:
+        parts = (c.data or "").split(":")
+        nid = int(parts[-1])
+    except Exception:
+        await c.answer("Ошибка", show_alert=True)
+        return
+    try:
+        init_db()
+        mark_notification_read(int(c.from_user.id), int(nid))
+    except Exception:
+        pass
+    try:
+        # убираем кнопку
+        await c.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
+    except Exception:
+        pass
+    await c.answer("Отмечено")
 
 # В read-only чате запрещаем обработку ЛЮБЫХ входящих апдейтов обычным роутером:
 # никаких команд, меню, кнопок и т.п. (в группе должны быть только отчёты).
