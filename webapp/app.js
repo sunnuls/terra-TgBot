@@ -1006,6 +1006,9 @@
   function _exportModalSet(open) {
     if (!exportModal) return;
     exportModal.hidden = !open;
+    try {
+      exportModal.style.display = open ? "flex" : "none";
+    } catch (e) {}
   }
 
   function _exportModalRender(st) {
