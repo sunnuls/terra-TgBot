@@ -344,7 +344,7 @@ def _report_required_fields(payload: dict) -> List[str]:
             if not (payload or {}).get(k):
                 missing.append(k)
     else:
-        for k in ("crop", "trips", "location"):
+        for k in ("crop", "location"):
             if not (payload or {}).get(k):
                 missing.append(k)
     return missing
@@ -2010,6 +2010,19 @@ def table_cols(table_name: str) -> List[str]:
 
 def init_db():
     with connect() as con, closing(con.cursor()) as c:
+
+        def _col_exists(table, col):
+            rows = c.execute(f"PRAGMA table_info({table})").fetchall()
+            return any(r[1] == col for r in (rows or []) if r and len(r) > 1)
+
+        def _try_add_col(table, col, col_type, after_sql=None):
+            try:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+                if after_sql:
+                    c.execute(after_sql)
+            except sqlite3.OperationalError:
+                pass
+
         # Базовые таблицы (создадутся, если их нет)
         c.execute("""
         CREATE TABLE IF NOT EXISTS users(
@@ -2022,10 +2035,9 @@ def init_db():
         )
         """)
 
-        # миграция users.last_chat_id (нужно для доставки уведомлений в личку)
-        ucols = table_cols("users")
-        if "last_chat_id" not in ucols:
-            c.execute("ALTER TABLE users ADD COLUMN last_chat_id INTEGER")
+        # миграции колонок таблицы users
+        _try_add_col("users", "phone", "TEXT")
+        _try_add_col("users", "last_chat_id", "INTEGER")
         c.execute("""
         CREATE TABLE IF NOT EXISTS activities(
           id    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2119,7 +2131,11 @@ def init_db():
           activity_grp  TEXT,
           work_date     TEXT,
           hours         INTEGER,
-          chat_id       INTEGER
+          chat_id       INTEGER,
+          machine_type  TEXT,
+          machine_name  TEXT,
+          crop          TEXT,
+          trips         INTEGER
         )
         """)
 
@@ -2302,36 +2318,34 @@ def init_db():
         )
         """)
 
+        # миграции reports: добавляем колонки техники/культуры если их нет
+        for col, col_type in [("machine_type", "TEXT"), ("machine_name", "TEXT"), ("crop", "TEXT"), ("trips", "INTEGER")]:
+            _try_add_col("reports", col, col_type)
+
         # миграция machine_kinds.mode (если старая схема)
-        mkcols = table_cols("machine_kinds")
-        if "mode" not in mkcols:
-            c.execute("ALTER TABLE machine_kinds ADD COLUMN mode TEXT")
-            c.execute("UPDATE machine_kinds SET mode='list' WHERE (mode IS NULL OR mode='')")
+        _try_add_col("machine_kinds", "mode", "TEXT",
+                     "UPDATE machine_kinds SET mode='list' WHERE (mode IS NULL OR mode='')")
 
         # миграции pos для справочников
-        acols = table_cols("activities")
-        if "pos" not in acols:
+        if not _col_exists("activities", "pos"):
             c.execute("ALTER TABLE activities ADD COLUMN pos INTEGER")
             rows = c.execute("SELECT id FROM activities ORDER BY grp, name, id").fetchall() or []
             for i, r in enumerate(rows):
                 c.execute("UPDATE activities SET pos=? WHERE id=?", (i + 1, int(r[0])))
 
-        lcols2 = table_cols("locations")
-        if "pos" not in lcols2:
+        if not _col_exists("locations", "pos"):
             c.execute("ALTER TABLE locations ADD COLUMN pos INTEGER")
             rows = c.execute("SELECT id FROM locations ORDER BY grp, name, id").fetchall() or []
             for i, r in enumerate(rows):
                 c.execute("UPDATE locations SET pos=? WHERE id=?", (i + 1, int(r[0])))
 
-        mkcols2 = table_cols("machine_kinds")
-        if "pos" not in mkcols2:
+        if not _col_exists("machine_kinds", "pos"):
             c.execute("ALTER TABLE machine_kinds ADD COLUMN pos INTEGER")
             rows = c.execute("SELECT id FROM machine_kinds ORDER BY id").fetchall() or []
             for i, r in enumerate(rows):
                 c.execute("UPDATE machine_kinds SET pos=? WHERE id=?", (i + 1, int(r[0])))
 
-        micols = table_cols("machine_items")
-        if "pos" not in micols:
+        if not _col_exists("machine_items", "pos"):
             c.execute("ALTER TABLE machine_items ADD COLUMN pos INTEGER")
             rows = c.execute("SELECT id, kind_id FROM machine_items ORDER BY kind_id, name, id").fetchall() or []
             per_kind = {}
@@ -2352,16 +2366,13 @@ def init_db():
             c.execute("INSERT OR IGNORE INTO machine_items(kind_id, name) VALUES (1, ?)", (tname,))
 
         # locations
-        lcols = table_cols("locations")
-        if "grp" not in lcols:
+        if not _col_exists("locations", "grp"):
             c.execute("ALTER TABLE locations ADD COLUMN grp TEXT")
-            # проставим значения групп по имени
             c.execute("UPDATE locations SET grp=? WHERE (grp IS NULL OR grp='') AND name='Склад'", (GROUP_WARE,))
             c.execute("UPDATE locations SET grp=? WHERE (grp IS NULL OR grp='') AND name<>'Склад'", (GROUP_FIELDS,))
 
         # activities
-        acols = table_cols("activities")
-        if "grp" not in acols:
+        if not _col_exists("activities", "grp"):
             c.execute("ALTER TABLE activities ADD COLUMN grp TEXT")
             # техника по списку, остальное — ручная
             placeholders = ",".join("?" * len(DEFAULT_TECH))
@@ -2394,8 +2405,7 @@ def init_db():
                 c.execute("INSERT OR IGNORE INTO activities(name, grp) VALUES (?, ?)", (name, GROUP_HAND))
 
         c.execute("CREATE TABLE IF NOT EXISTS crops(name TEXT PRIMARY KEY, pos INTEGER)")
-        ccols = table_cols("crops")
-        if "pos" not in ccols:
+        if not _col_exists("crops", "pos"):
             c.execute("ALTER TABLE crops ADD COLUMN pos INTEGER")
             rows = c.execute("SELECT rowid FROM crops ORDER BY name, rowid").fetchall() or []
             for i, r in enumerate(rows):
@@ -2721,10 +2731,15 @@ def is_brigadier(user_id: int, username: Optional[str]=None) -> bool:
         r = c.execute("SELECT 1 FROM brigadiers WHERE user_id=?", (user_id,)).fetchone()
         return bool(r)
 
-def get_role_label(user_id: int) -> str:
+def is_accountant(user_id: int, username: Optional[str]=None) -> bool:
+    return _get_role(user_id) == "accountant"
+
+def get_role_label(user_id: int, live_username: Optional[str] = None) -> str:
     u = get_user(user_id) or {}
-    uname = u.get("username")
-    if (user_id in ADMIN_IDS) or (uname and uname.lower().lstrip("@") in ADMIN_USERNAMES):
+    db_uname = u.get("username") or ""
+    # Приоритет: живой username из сообщения, затем из БД
+    uname = (live_username or db_uname or "").lower().lstrip("@")
+    if (user_id in ADMIN_IDS) or (uname and uname in ADMIN_USERNAMES):
         return "admin"
     if is_tim(user_id, uname):
         return "tim"
@@ -2732,6 +2747,8 @@ def get_role_label(user_id: int) -> str:
         return "it"
     if is_brigadier(user_id, uname):
         return "brigadier"
+    if is_accountant(user_id, uname):
+        return "accountant"
     return "user"
 
 
@@ -3990,21 +4007,25 @@ def get_or_create_monthly_sheet(year: int, month: int):
             spreadsheet_id = file["id"]
             sheet_url = file["webViewLink"]
             
-            # Добавляем заголовки (формат как на скринах: 7 колонок)
+            # Заголовки таблицы ОТД (11 колонок, Фаза 1 roadmap)
             headers = [[
-                "Дата создания",
                 "User ID",
                 "Имя",
-                "Локация",
-                "Вид работы",
                 "Дата работы",
                 "Часы",
+                "Тип работ",
+                "Тип Техники",
+                "Техника",
+                "Вид деятельности",
+                "Вид работы",
+                "Поле",
+                "Культура",
             ]]
             
             def update_headers():
                 return sheets.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id,
-                    range="A1:G1",
+                    range="A1:K1",
                     valueInputOption="RAW",
                     body={"values": headers}
                 ).execute()
@@ -4165,10 +4186,10 @@ def get_or_create_brig_monthly_sheet(year: int, month: int):
 def get_reports_to_export():
     """Получить список отчетов для экспорта (новые, измененные, удаленные)"""
     with connect() as con, closing(con.cursor()) as c:
-        # Получаем все отчеты, которые нужно экспортировать
         rows = c.execute("""
         SELECT r.id, r.created_at, COALESCE(u.phone, '') AS phone, r.reg_name, r.location, r.activity, r.work_date, r.hours,
-               ge.report_id as is_exported, ge.row_number, ge.last_updated
+               ge.report_id as is_exported, ge.row_number, ge.last_updated,
+               r.machine_type, r.machine_name, r.crop
         FROM reports r
         LEFT JOIN users u ON u.user_id = r.user_id
         LEFT JOIN google_exports ge ON r.id = ge.report_id
@@ -4186,6 +4207,448 @@ def get_deleted_reports():
         WHERE r.id IS NULL
         """).fetchall()
         return rows
+
+def get_reports_for_period(date_from: str, date_to: str) -> List[dict]:
+    """Получить все ОТД-отчёты за указанный период из локальной БД (резервная функция)."""
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute("""
+        SELECT r.id, r.created_at, COALESCE(u.phone, '') AS phone, r.reg_name,
+               r.location, r.activity, r.activity_grp, r.work_date, r.hours,
+               r.machine_type, r.machine_name, r.crop, r.trips
+        FROM reports r
+        LEFT JOIN users u ON u.user_id = r.user_id
+        WHERE r.work_date >= ? AND r.work_date <= ?
+        ORDER BY r.work_date, r.reg_name, r.created_at
+        """, (date_from, date_to)).fetchall()
+    result = []
+    for r in rows:
+        result.append({
+            "id": r[0], "created_at": r[1], "phone": r[2], "name": r[3],
+            "location": r[4], "activity": r[5], "activity_grp": r[6],
+            "work_date": r[7], "hours": r[8],
+            "machine_type": r[9], "machine_name": r[10], "crop": r[11], "trips": r[12],
+        })
+    return result
+
+
+def get_reports_from_sheets_for_period(date_from: str, date_to: str) -> List[dict]:
+    """Читает данные ОТД из Google Sheets за указанный период.
+
+    Поддерживает два формата таблиц:
+      Старый (7 кол): Дата создания | User ID | Имя | Локация | Вид работы | Дата работы | Часы
+      Новый (11 кол): User ID | Имя | Дата работы | Часы | Тип работ | Тип Техники | Техника | Вид деятельности | Вид работы | Поле | Культура
+
+    Возвращает список dict с ключами готовыми для build_accounting_excel.
+    """
+    try:
+        creds = get_google_credentials()
+        if not creds:
+            return []
+        sheets_svc = build("sheets", "v4", credentials=creds)
+        drive_svc  = build("drive",  "v3", credentials=creds)
+    except Exception as e:
+        logging.error(f"[acct] Google credentials error: {e}")
+        return []
+
+    month_names = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                   "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+
+    # Собираем все месяцы, попадающие в диапазон
+    from datetime import date as _date
+    try:
+        d_from = _date.fromisoformat(date_from)
+        d_to   = _date.fromisoformat(date_to)
+    except ValueError:
+        return []
+
+    months = []
+    y, m = d_from.year, d_from.month
+    while (y, m) <= (d_to.year, d_to.month):
+        months.append((y, m))
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+
+    result = []
+
+    for year, month in months:
+        sheet_name = f"{EXPORT_PREFIX} - {month_names[month]} {year}"
+
+        # Ищем spreadsheet_id в БД
+        spreadsheet_id = None
+        try:
+            with connect() as con, closing(con.cursor()) as cur:
+                row = cur.execute(
+                    "SELECT spreadsheet_id FROM monthly_sheets WHERE year=? AND month=?",
+                    (year, month)
+                ).fetchone()
+                if row:
+                    spreadsheet_id = row[0]
+        except Exception:
+            pass
+
+        # Если нет в БД — ищем в Drive (сначала в папке, потом без ограничений)
+        if not spreadsheet_id:
+            if DRIVE_FOLDER_ID:
+                try:
+                    sid, _ = _drive_find_spreadsheet_in_folder(
+                        drive_svc, folder_id=DRIVE_FOLDER_ID, name=sheet_name
+                    )
+                    spreadsheet_id = sid
+                    if sid:
+                        logging.info(f"[acct] Found in folder: {sheet_name} → {sid}")
+                except Exception as e:
+                    logging.warning(f"[acct] Folder search failed for '{sheet_name}': {e}")
+
+        # Fallback: ищем по всем доступным файлам (без ограничения папки)
+        if not spreadsheet_id:
+            try:
+                q_all = (
+                    "mimeType='application/vnd.google-apps.spreadsheet' "
+                    f"and name='{_drive_escape_q(sheet_name)}' "
+                    "and trashed=false"
+                )
+                def _list_all(q=q_all):
+                    return drive_svc.files().list(
+                        q=q,
+                        fields="files(id, webViewLink, createdTime)",
+                        pageSize=5,
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                    ).execute()
+                res = retry_google_api_call(_list_all)
+                files = (res or {}).get("files") or []
+                if files:
+                    f0 = sorted(files, key=lambda f: f.get("createdTime") or "", reverse=True)[0]
+                    spreadsheet_id = f0.get("id")
+                    logging.info(f"[acct] Found via global search: {sheet_name} → {spreadsheet_id}")
+            except Exception as e:
+                logging.warning(f"[acct] Global search failed for '{sheet_name}': {e}")
+
+        if not spreadsheet_id:
+            logging.info(f"[acct] Sheet not found anywhere: {sheet_name}")
+            continue
+
+        # Читаем данные из таблицы
+        try:
+            def _read(sid=spreadsheet_id):
+                return sheets_svc.spreadsheets().values().get(
+                    spreadsheetId=sid,
+                    range="A:K",
+                    valueRenderOption="FORMATTED_VALUE",
+                    dateTimeRenderOption="FORMATTED_STRING",
+                ).execute()
+            data = retry_google_api_call(_read)
+            rows = data.get("values", []) if data else []
+            logging.info(f"[acct] Sheet '{sheet_name}': {len(rows)} rows (incl. header)")
+        except Exception as e:
+            logging.error(f"[acct] Failed to read sheet '{sheet_name}': {e}")
+            continue
+
+        if len(rows) < 2:
+            continue
+
+        header = [str(h).strip() for h in rows[0]]
+        # Формат определяем по первому заголовку
+        is_new = len(header) >= 1 and header[0].strip() == "User ID"
+
+        for row in rows[1:]:
+            def _c(idx, default=""):
+                return str(row[idx]).strip() if idx < len(row) else default
+
+            if is_new:
+                # Новый формат: уже готовые 11 колонок
+                user_id      = _c(0)
+                name         = _c(1)
+                work_date    = _c(2)
+                hours_raw    = _c(3)
+                work_kind    = _c(4)
+                tech_kind    = _c(5)
+                tech_name    = _c(6)
+                tech_activity = _c(7)
+                hand_work    = _c(8)
+                location     = _c(9)
+                crop         = _c(10)
+            else:
+                # Старый формат: A=Дата создания, B=User ID, C=Имя, D=Локация, E=Вид работы, F=Дата работы, G=Часы
+                user_id      = _c(1)
+                name         = _c(2)
+                location     = _c(3)
+                activity_old = _c(4)
+                work_date    = _c(5)
+                hours_raw    = _c(6)
+                work_kind    = ""
+                tech_kind    = ""
+                tech_name    = ""
+                tech_activity = ""
+                hand_work    = activity_old
+                crop         = ""
+
+            if not work_date:
+                continue
+            # Фильтр по дате
+            if work_date < date_from or work_date > date_to:
+                continue
+
+            try:
+                hours = float(hours_raw) if hours_raw else 0
+            except ValueError:
+                hours = 0
+
+            result.append({
+                "user_id":       user_id,
+                "name":          name,
+                "work_date":     work_date,
+                "hours":         hours,
+                "work_kind":     work_kind,
+                "tech_kind":     tech_kind,
+                "tech_name":     tech_name,
+                "tech_activity": tech_activity,
+                "hand_work":     hand_work,
+                "location":      location,
+                "crop":          crop,
+            })
+
+    result.sort(key=lambda r: (r.get("work_date", ""), r.get("name", "")))
+    return result
+
+
+def get_reports_from_sheets_for_period_with_meta(date_from: str, date_to: str):
+    """Как get_reports_from_sheets_for_period, но также возвращает мета-информацию.
+    Возвращает (records: List[dict], found: List[str], not_found: List[str])
+    """
+    try:
+        creds = get_google_credentials()
+        if not creds:
+            return [], [], []
+        sheets_svc = build("sheets", "v4", credentials=creds)
+        drive_svc  = build("drive",  "v3", credentials=creds)
+    except Exception as e:
+        logging.error(f"[acct] Google credentials error: {e}")
+        return [], [], []
+
+    month_names = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                   "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+
+    from datetime import date as _date
+    try:
+        d_from = _date.fromisoformat(date_from)
+        d_to   = _date.fromisoformat(date_to)
+    except ValueError:
+        return [], [], []
+
+    months = []
+    y, m = d_from.year, d_from.month
+    while (y, m) <= (d_to.year, d_to.month):
+        months.append((y, m))
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+
+    result = []
+    found_sheets = []
+    not_found_sheets = []
+
+    for year, month in months:
+        sheet_name = f"{EXPORT_PREFIX} - {month_names[month]} {year}"
+        short_name = f"{month_names[month]} {year}"
+
+        spreadsheet_id = None
+        try:
+            with connect() as con, closing(con.cursor()) as cur:
+                row = cur.execute(
+                    "SELECT spreadsheet_id FROM monthly_sheets WHERE year=? AND month=?",
+                    (year, month)
+                ).fetchone()
+                if row:
+                    spreadsheet_id = row[0]
+        except Exception:
+            pass
+
+        if not spreadsheet_id and DRIVE_FOLDER_ID:
+            try:
+                sid, _ = _drive_find_spreadsheet_in_folder(
+                    drive_svc, folder_id=DRIVE_FOLDER_ID, name=sheet_name
+                )
+                spreadsheet_id = sid
+            except Exception as e:
+                logging.warning(f"[acct] Folder search failed for '{sheet_name}': {e}")
+
+        if not spreadsheet_id:
+            try:
+                q_all = (
+                    "mimeType='application/vnd.google-apps.spreadsheet' "
+                    f"and name='{_drive_escape_q(sheet_name)}' "
+                    "and trashed=false"
+                )
+                def _list_all(q=q_all):
+                    return drive_svc.files().list(
+                        q=q,
+                        fields="files(id, webViewLink, createdTime)",
+                        pageSize=5,
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                    ).execute()
+                res = retry_google_api_call(_list_all)
+                files = (res or {}).get("files") or []
+                if files:
+                    f0 = sorted(files, key=lambda f: f.get("createdTime") or "", reverse=True)[0]
+                    spreadsheet_id = f0.get("id")
+            except Exception:
+                pass
+
+        if not spreadsheet_id:
+            not_found_sheets.append(short_name)
+            continue
+
+        try:
+            def _read(sid=spreadsheet_id):
+                return sheets_svc.spreadsheets().values().get(
+                    spreadsheetId=sid,
+                    range="A:K",
+                    valueRenderOption="FORMATTED_VALUE",
+                    dateTimeRenderOption="FORMATTED_STRING",
+                ).execute()
+            data = retry_google_api_call(_read)
+            rows = data.get("values", []) if data else []
+        except Exception as e:
+            logging.error(f"[acct] Failed to read '{sheet_name}': {e}")
+            not_found_sheets.append(short_name + " (ошибка чтения)")
+            continue
+
+        if len(rows) < 2:
+            found_sheets.append(short_name + " (пусто)")
+            continue
+
+        header = [str(h).strip() for h in rows[0]]
+        is_new = len(header) >= 1 and header[0].strip() == "User ID"
+        count_before = len(result)
+
+        for row in rows[1:]:
+            def _c(idx, default=""):
+                return str(row[idx]).strip() if idx < len(row) else default
+
+            if is_new:
+                user_id = _c(0); name = _c(1); work_date = _c(2); hours_raw = _c(3)
+                work_kind = _c(4); tech_kind = _c(5); tech_name = _c(6)
+                tech_activity = _c(7); hand_work = _c(8); location = _c(9); crop = _c(10)
+            else:
+                user_id = _c(1); name = _c(2); location = _c(3)
+                activity_old = _c(4); work_date = _c(5); hours_raw = _c(6)
+                work_kind = ""; tech_kind = ""; tech_name = ""
+                tech_activity = ""; hand_work = activity_old; crop = ""
+
+            if not work_date:
+                continue
+            # Нормализуем дату: поддержка DD.MM.YYYY и YYYY-MM-DD
+            normalized = _parse_date_input(work_date) or work_date
+            if normalized < date_from or normalized > date_to:
+                continue
+
+            try:
+                hours = float(hours_raw) if hours_raw else 0
+            except ValueError:
+                hours = 0
+
+            result.append({
+                "user_id": user_id, "name": name, "work_date": normalized, "hours": hours,
+                "work_kind": work_kind, "tech_kind": tech_kind, "tech_name": tech_name,
+                "tech_activity": tech_activity, "hand_work": hand_work,
+                "location": location, "crop": crop,
+            })
+
+        added = len(result) - count_before
+        found_sheets.append(f"{short_name} ({added} зап.)")
+
+    result.sort(key=lambda r: (r.get("work_date", ""), r.get("name", "")))
+    return result, found_sheets, not_found_sheets
+
+def _build_excel_from_records(reports: List[dict], date_from: str = "", date_to: str = "") -> Optional[bytes]:
+    """Формирует Excel зарплатного отчёта: период + суммарные часы по каждому работнику."""
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        logging.error("openpyxl не установлен")
+        return None
+
+    # --- Суммируем часы по работникам ---
+    from collections import OrderedDict
+    totals = OrderedDict()
+    for rep in reports:
+        name = (rep.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            h = float(rep.get("hours") or 0)
+        except (TypeError, ValueError):
+            h = 0
+        totals[name] = totals.get(name, 0) + h
+
+    # --- Форматируем даты для отображения DD.MM.YY ---
+    def _fmt(d: str) -> str:
+        # d = YYYY-MM-DD
+        if d and len(d) == 10:
+            return f"{d[8:10]}.{d[5:7]}.{d[2:4]}"
+        return d
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Отчет для бухгалтерии по ОТД"
+
+    bold = Font(bold=True)
+    thin = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center")
+    left = Alignment(horizontal="left", vertical="center")
+
+    # --- Строка 1: Начальная дата ---
+    ws.cell(row=1, column=2, value="Начальная дата начисления ЗП").font = bold
+    ws.cell(row=1, column=3, value=_fmt(date_from))
+
+    # --- Строка 2: Конечная дата ---
+    ws.cell(row=2, column=2, value="Конечная дата начисления ЗП").font = bold
+    ws.cell(row=2, column=3, value=_fmt(date_to))
+
+    # --- Строки с работниками ---
+    row_idx = 3
+    for num, (name, hours) in enumerate(totals.items(), 1):
+        ws.cell(row=row_idx, column=1, value=num).alignment = center
+        ws.cell(row=row_idx, column=2, value=name).alignment = left
+        c = ws.cell(row=row_idx, column=3, value=int(hours) if hours == int(hours) else hours)
+        c.alignment = center
+        for col in (1, 2, 3):
+            ws.cell(row=row_idx, column=col).border = border
+        row_idx += 1
+
+    # --- Итого ---
+    total_hours = sum(totals.values())
+    ws.cell(row=row_idx, column=2, value="итого").font = bold
+    ws.cell(row=row_idx, column=2).alignment = center
+    c = ws.cell(row=row_idx, column=3, value=int(total_hours) if total_hours == int(total_hours) else total_hours)
+    c.font = bold
+    c.alignment = center
+    for col in (1, 2, 3):
+        ws.cell(row=row_idx, column=col).border = border
+
+    # --- Ширина колонок ---
+    ws.column_dimensions["A"].width = 6
+    max_name = max((len(n) for n in totals), default=20)
+    ws.column_dimensions["B"].width = min(max_name + 4, 45)
+    ws.column_dimensions["C"].width = 10
+
+    import io as _io
+    buf = _io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+def build_accounting_excel(date_from: str, date_to: str) -> Optional[bytes]:
+    """Сформировать Excel-файл бухгалтерского отчёта за период (legacy-обёртка)."""
+    reports = get_reports_from_sheets_for_period(date_from, date_to)
+    return _build_excel_from_records(reports)
 
 def get_brig_reports_to_export():
     """Получить список бригадирских отчетов для экспорта (новые/измененные/удаленные)."""
@@ -4536,7 +4999,7 @@ def export_reports_to_sheets():
             def get_existing_data():
                 return sheets_service.spreadsheets().values().get(
                     spreadsheetId=spreadsheet_id,
-                    range="A:G"
+                    range="A:K"
                 ).execute()
             
             try:
@@ -4547,16 +5010,29 @@ def export_reports_to_sheets():
                 next_row = 2  # Начинаем со второй строки (после заголовков)
             
             # Обрабатываем отчеты
-            for report_id, created_at, phone, name, location, activity, work_date, hours, is_exported, row_number, last_updated in reports:
-                # phone (UserID) — телефон. Если не указан, оставляем пустым (но в логах это будет видно).
-                values = [format_dt_minute(created_at), phone, name, location, activity, work_date, hours]
+            for report_id, created_at, phone, name, location, activity, work_date, hours, is_exported, row_number, last_updated, machine_type, machine_name, crop in reports:
+                # Формируем 11 колонок (Фаза 1 roadmap)
+                # machine_type = "Ручная" для ручных работ, "Трактор"/"КамАЗ" для техники, NULL для старых записей
+                is_hand = not machine_type or machine_type.lower() == "ручная"
+                work_kind = "Ручная" if is_hand else "Техника"
+                tech_kind = machine_type if not is_hand else ""
+                tech_name = machine_name or "" if not is_hand else ""
+                # Вид деятельности: для КамАЗ автоматически "Перевозка"
+                if not is_hand and machine_type and machine_type.lower() == "камаз":
+                    tech_activity = "Перевозка"
+                elif not is_hand:
+                    tech_activity = activity or ""
+                else:
+                    tech_activity = ""
+                hand_work = activity if is_hand else ""
+                values = [phone, name, work_date, hours, work_kind, tech_kind, tech_name, tech_activity, hand_work, location, crop or ""]
                 
                 if is_exported and row_number:
                     # Обновляем существующую запись с повторными попытками
                     def update_record():
                         return sheets_service.spreadsheets().values().update(
                             spreadsheetId=spreadsheet_id,
-                            range=f"A{row_number}:G{row_number}",
+                            range=f"A{row_number}:K{row_number}",
                             valueInputOption="RAW",
                             body={"values": [values]}
                         ).execute()
@@ -4584,7 +5060,7 @@ def export_reports_to_sheets():
                     def add_record():
                         return sheets_service.spreadsheets().values().update(
                             spreadsheetId=spreadsheet_id,
-                            range=f"A{next_row}:G{next_row}",
+                            range=f"A{next_row}:K{next_row}",
                             valueInputOption="RAW",
                             body={"values": [values]}
                         ).execute()
@@ -4711,8 +5187,14 @@ class AdminFSM(StatesGroup):
     del_pick = State()
     add_brig_id = State()
     del_brig_id = State()
+    add_acct_id = State()
+    del_acct_id = State()
     edit_name = State()
     edit_confirm = State()
+
+class AccountantFSM(StatesGroup):
+    pick_date_from = State()
+    pick_date_to = State()
 
 class EditFSM(StatesGroup):
     waiting_field_numbers = State()
@@ -5105,8 +5587,11 @@ async def _send_new_message(bot: Bot, chat_id: int, user_id: int, text: str, rep
     await _ui_edit_content(bot, chat_id, user_id, text, reply_markup=reply_markup)
 
 def reply_menu_kb() -> ReplyKeyboardMarkup:
+    rows = [[KeyboardButton(text="🔄 Сброс")]]
+    if WEBAPP_URL:
+        rows.append([KeyboardButton(text="📱 Приложение", web_app=WebAppInfo(url=WEBAPP_URL))])
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="🔄 Сброс")]],
+        keyboard=rows,
         resize_keyboard=True,
         is_persistent=True,
         one_time_keyboard=False,
@@ -5126,7 +5611,7 @@ def phone_contact_kb() -> ReplyKeyboardMarkup:
         one_time_keyboard=True,
     )
 
-async def _ui_reset(bot: Bot, chat_id: int, user_id: int) -> None:
+async def _ui_reset(bot: Bot, chat_id: int, user_id: int, live_username: Optional[str] = None) -> None:
     """
     "Мягкий reset" UI: очищает ui_state (menu/content), пытается удалить UI-сообщения,
     сбрасывает FSM и создаёт новое главное меню.
@@ -5152,7 +5637,7 @@ async def _ui_reset(bot: Bot, chat_id: int, user_id: int) -> None:
     # 1) создаём статичное меню (reply keyboard with "🔄 Сброс")
     await _ui_ensure_main_menu(bot, chat_id, user_id)
     # 2) и сразу рисуем контент-меню с inline кнопками (чтобы не требовался /start)
-    role = get_role_label(user_id)
+    role = get_role_label(user_id, live_username)
     await _ui_edit_content(bot, chat_id, user_id, "Выберите действие:", reply_markup=main_menu_kb(role))
 
 # Удаляем отдельные клавиатуры - используем только одну для всех
@@ -5396,8 +5881,6 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
         kb.button(text="📊 Статистика", callback_data="menu:stats")
         kb.button(text="⚙️ Настройки", callback_data="menu:name")
         kb.adjust(2, 1)
-        if WEBAPP_URL:
-            kb.row(InlineKeyboardButton(text="📱 Приложение", web_app=WebAppInfo(url=WEBAPP_URL)))
         return kb.as_markup()
 
     if role == "it":
@@ -5405,19 +5888,14 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
         kb.button(text="📊 Статистика", callback_data="menu:stats")
         kb.button(text="⚙️ Настройки", callback_data="menu:name")
         kb.adjust(2, 1)
-        if WEBAPP_URL:
-            kb.row(InlineKeyboardButton(text="📱 Приложение", web_app=WebAppInfo(url=WEBAPP_URL)))
         return kb.as_markup()
 
     if role == "brigadier":
         kb.button(text="ОБ", callback_data="brig:report")
         kb.button(text="ОТД", callback_data="otd:start")
-        # Унифицированная статистика (один вход для всех ролей)
         kb.button(text="Статистика", callback_data="menu:stats")
         kb.button(text="Настройки", callback_data="menu:name")
         kb.adjust(2, 2)
-        if WEBAPP_URL:
-            kb.row(InlineKeyboardButton(text="📱 Приложение", web_app=WebAppInfo(url=WEBAPP_URL)))
         return kb.as_markup()
 
     if role == "admin":
@@ -5425,9 +5903,16 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
         kb.button(text="📊 Статистика", callback_data="menu:stats")
         kb.button(text="⚙️ Настройки", callback_data="menu:name")
         kb.button(text="⚙️ Админ", callback_data="menu:admin")
-        kb.adjust(2, 2)
-        if WEBAPP_URL:
-            kb.row(InlineKeyboardButton(text="📱 Приложение", web_app=WebAppInfo(url=WEBAPP_URL)))
+        kb.button(text="🧾 Отчет ЗП-ОТД", callback_data="acct:start")
+        kb.adjust(2, 2, 1)
+        return kb.as_markup()
+
+    if role == "accountant":
+        kb.button(text="ОТД", callback_data="otd:start")
+        kb.button(text="📊 Статистика", callback_data="menu:stats")
+        kb.button(text="⚙️ Настройки", callback_data="menu:name")
+        kb.button(text="🧾 Отчет ЗП-ОТД", callback_data="acct:start")
+        kb.adjust(2, 1, 1)
         return kb.as_markup()
 
     # обычный пользователь
@@ -5435,8 +5920,6 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
     kb.button(text="Статистика", callback_data="menu:stats")
     kb.button(text="Настройки", callback_data="menu:name")
     kb.adjust(2, 1)
-    if WEBAPP_URL:
-        kb.row(InlineKeyboardButton(text="📱 Приложение", web_app=WebAppInfo(url=WEBAPP_URL)))
     return kb.as_markup()
 
 def settings_menu_kb() -> InlineKeyboardMarkup:
@@ -5604,7 +6087,7 @@ def otd_confirm_kb() -> InlineKeyboardMarkup:
     kb.button(text="✅ Подтвердить", callback_data="otd:confirm:ok")
     kb.button(text="✏️ Изменить", callback_data="otd:confirm:edit")
     kb.adjust(2)
-    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:root"))
+    kb.row(InlineKeyboardButton(text="❌ Отменить (в главное меню)", callback_data="menu:root"))
     return kb.as_markup()
 
 def otd_confirm_edit_kb() -> InlineKeyboardMarkup:
@@ -5895,8 +6378,10 @@ def admin_roles_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Выдать бригадира", callback_data="adm:role:add:brig")
     kb.button(text="➖ Снять бригадира", callback_data="adm:role:del:brig")
+    kb.button(text="➕ Выдать бухгалтера", callback_data="adm:role:add:acct")
+    kb.button(text="➖ Снять бухгалтера", callback_data="adm:role:del:acct")
     kb.button(text="🔙 Назад", callback_data="menu:admin")
-    kb.adjust(2,1)
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 def admin_role_add_brig_kb(page: int = 0, page_size: int = 12) -> InlineKeyboardMarkup:
@@ -5960,6 +6445,68 @@ def admin_role_del_brig_kb(page: int = 0, page_size: int = 12) -> InlineKeyboard
         nav.adjust(3)
         kb.attach(nav)
 
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:roles"))
+    return kb.as_markup()
+
+def admin_role_add_acct_kb(page: int = 0, page_size: int = 12) -> InlineKeyboardMarkup:
+    total = count_registered_users()
+    kb = InlineKeyboardBuilder()
+    if total <= 0:
+        kb.button(text="— нет зарегистрированных —", callback_data="adm:roles")
+        kb.button(text="🔙 Назад", callback_data="adm:roles")
+        kb.adjust(1, 1)
+        return kb.as_markup()
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, pages - 1))
+    offset = page * page_size
+    users = list_registered_users(page_size, offset)
+    for u in users:
+        label = _display_user(u.get("full_name"), u.get("username"), u["user_id"])
+        kb.button(text=label[:64], callback_data=f"adm:role:add:acct:pick:{u['user_id']}")
+    kb.adjust(1)
+    if pages > 1:
+        nav = InlineKeyboardBuilder()
+        if page > 0:
+            nav.button(text="⬅️", callback_data=f"adm:role:add:acct:page:{page-1}")
+        nav.button(text=f"{page+1}/{pages}", callback_data="adm:roles")
+        if page < pages - 1:
+            nav.button(text="➡️", callback_data=f"adm:role:add:acct:page:{page+1}")
+        nav.adjust(3)
+        kb.attach(nav)
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:roles"))
+    return kb.as_markup()
+
+def admin_role_del_acct_kb(page: int = 0, page_size: int = 12) -> InlineKeyboardMarkup:
+    with connect() as con, closing(con.cursor()) as c:
+        rows = c.execute(
+            "SELECT ur.user_id, u.full_name, u.username FROM user_roles ur "
+            "LEFT JOIN users u ON u.user_id=ur.user_id WHERE ur.role='accountant' "
+            "ORDER BY LOWER(COALESCE(u.full_name,'')) ASC LIMIT ? OFFSET ?",
+            (page_size, page * page_size),
+        ).fetchall()
+        total_r = c.execute("SELECT COUNT(*) FROM user_roles WHERE role='accountant'").fetchone()
+    total = int((total_r[0] if total_r else 0) or 0)
+    kb = InlineKeyboardBuilder()
+    if total <= 0:
+        kb.button(text="— бухгалтеров нет —", callback_data="adm:roles")
+        kb.button(text="🔙 Назад", callback_data="adm:roles")
+        kb.adjust(1, 1)
+        return kb.as_markup()
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, pages - 1))
+    for r in rows:
+        label = _display_user(r[1], r[2], r[0])
+        kb.button(text=label[:64], callback_data=f"adm:role:del:acct:pick:{r[0]}")
+    kb.adjust(1)
+    if pages > 1:
+        nav = InlineKeyboardBuilder()
+        if page > 0:
+            nav.button(text="⬅️", callback_data=f"adm:role:del:acct:page:{page-1}")
+        nav.button(text=f"{page+1}/{pages}", callback_data="adm:roles")
+        if page < pages - 1:
+            nav.button(text="➡️", callback_data=f"adm:role:del:acct:page:{page+1}")
+        nav.adjust(3)
+        kb.attach(nav)
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="adm:roles"))
     return kb.as_markup()
 
@@ -6360,13 +6907,16 @@ async def cmd_start(message: Message, state: FSMContext):
         await _prompt_phone_registration(message, state, back_cb="menu:root")
         return
 
-    await show_main_menu(message.chat.id, message.from_user.id, u, "Готово. Выберите пункт меню.")
+    await show_main_menu(message.chat.id, message.from_user.id, u, "Готово. Выберите пункт меню.", live_username=message.from_user.username)
 
-@router.message(StateFilter(None), F.text)
+_PERSISTENT_KB_TEXTS = {"🧰 Меню", "🔄 Сброс"}
+
+@router.message(StateFilter(None), F.text, ~F.text.in_(_PERSISTENT_KB_TEXTS))
 async def auto_register_on_any_text(message: Message, state: FSMContext):
     """
     UX: новый пользователь может начать регистрацию "первым любым сообщением", а не только /start.
     Не вмешиваемся в активные FSM-сценарии и не реагируем в READONLY чате.
+    Кнопки постоянной клавиатуры (🔄 Сброс, 🧰 Меню) исключены — у них свои хендлеры.
     """
     if not message.from_user or message.from_user.is_bot:
         return
@@ -6419,7 +6969,7 @@ async def auto_register_on_any_text(message: Message, state: FSMContext):
         await _prompt_phone_registration(message, state, back_cb="menu:root")
         return
 
-    await show_main_menu(message.chat.id, message.from_user.id, u, "Готово. Выберите пункт меню.")
+    await show_main_menu(message.chat.id, message.from_user.id, u, "Готово. Выберите пункт меню.", live_username=message.from_user.username)
 
 @router.message(Command("today"))
 async def cmd_today(message: Message):
@@ -6468,7 +7018,7 @@ async def cmd_reset_ui(message: Message, state: FSMContext):
     await state.clear()
     # удалим саму команду пользователя (если можем) и перерисуем меню
     await _ui_try_delete_user_message(message)
-    await _ui_reset(message.bot, message.chat.id, message.from_user.id)
+    await _ui_reset(message.bot, message.chat.id, message.from_user.id, message.from_user.username)
 
 @router.message(Command("reset"))
 async def cmd_reset(message: Message, state: FSMContext):
@@ -6477,7 +7027,7 @@ async def cmd_reset(message: Message, state: FSMContext):
         return
     await state.clear()
     await _ui_try_delete_user_message(message)
-    await _ui_reset(message.bot, message.chat.id, message.from_user.id)
+    await _ui_reset(message.bot, message.chat.id, message.from_user.id, message.from_user.username)
 
 @router.message(Command("purge_release"))
 async def cmd_purge_release(message: Message, state: FSMContext):
@@ -6559,7 +7109,7 @@ async def cmd_menu(message: Message, state: FSMContext):
     except TelegramBadRequest:
         pass
     
-    await show_main_menu(message.chat.id, message.from_user.id, u, "Меню")
+    await show_main_menu(message.chat.id, message.from_user.id, u, "Меню", live_username=message.from_user.username)
 
 @router.message(F.web_app_data)
 async def webapp_data_message(message: Message, state: FSMContext):
@@ -6746,7 +7296,7 @@ async def msg_persistent_menu(message: Message, state: FSMContext):
     # Нижняя кнопка теперь — "аварийный reset UI". Для совместимости принимаем и старый текст "🧰 Меню".
     await state.clear()
     await _ui_try_delete_user_message(message)
-    await _ui_reset(message.bot, message.chat.id, message.from_user.id)
+    await _ui_reset(message.bot, message.chat.id, message.from_user.id, message.from_user.username)
 
 # Удалены лишние обработчики кнопок постоянной клавиатуры
 
@@ -6793,18 +7343,18 @@ async def capture_full_name(message: Message, state: FSMContext):
         return
 
     if is_new_user:
-        await show_main_menu(message.chat.id, message.from_user.id, u, f"✅ Зарегистрировано как: <b>{text}</b>")
+        await show_main_menu(message.chat.id, message.from_user.id, u, f"✅ Зарегистрировано как: <b>{text}</b>", live_username=message.from_user.username)
     else:
-        await show_main_menu(message.chat.id, message.from_user.id, u, f"✏️ Имя изменено на: <b>{text}</b>")
+        await show_main_menu(message.chat.id, message.from_user.id, u, f"✏️ Имя изменено на: <b>{text}</b>", live_username=message.from_user.username)
 
 # -------------- Рисовалки экранов --------------
 
-async def show_main_menu(chat_id:int, user_id:int, u:dict, header:str):
+async def show_main_menu(chat_id:int, user_id:int, u:dict, header:str, live_username: Optional[str] = None):
     # В схеме UI:
     # - 1-е сообщение: статичное "приветствие" + ReplyKeyboard (🔄 Сброс)
     # - 2-е сообщение: контент/подменю с InlineKeyboard
     await _ui_ensure_main_menu(bot, chat_id, user_id)
-    role = get_role_label(user_id)
+    role = get_role_label(user_id, live_username)
     await _ui_edit_content(bot, chat_id, user_id, "Выберите действие:", reply_markup=main_menu_kb(role))
 
 async def show_settings_menu(bot: Bot, chat_id:int, user_id:int, header:str="Здесь вы можете сменить ФИО."):
@@ -6941,9 +7491,8 @@ def _format_otd_summary(work: dict) -> str:
     location = work.get("location") or "—"
     # Для КамАЗа (machine_mode=single) "Работа" не выбирается — показываем груз вместо культуры.
     if work.get("machine_mode") == "single":
-        lines.append(f"5. Груз - {work.get('crop', '—')}")
-        lines.append(f"6. Место погрузки - {location}")
-        lines.append(f"7. Рейсов - {work.get('trips') or 0}")
+        lines.append(f"5. Культура - {work.get('crop', '—')}")
+        lines.append(f"6. Поле - {location}")
     else:
         lines.append(f"5. Работа - {work.get('activity', '—')}")
         lines.append(f"6. Культура - {work.get('crop', '—')}")
@@ -6961,9 +7510,8 @@ def _format_otd_summary_with_title(work: dict, title: str) -> str:
     lines.append(f"4. {machine_name}")
     location = work.get("location") or "—"
     if work.get("machine_mode") == "single":
-        lines.append(f"5. Груз - {work.get('crop', '—')}")
-        lines.append(f"6. Место погрузки - {location}")
-        lines.append(f"7. Рейсов - {work.get('trips') or 0}")
+        lines.append(f"5. Культура - {work.get('crop', '—')}")
+        lines.append(f"6. Поле - {location}")
     else:
         lines.append(f"5. Работа - {work.get('activity', '—')}")
         lines.append(f"6. Культура - {work.get('crop', '—')}")
@@ -6979,6 +7527,7 @@ async def cb_menu_root(c: CallbackQuery, state: FSMContext):
         c.from_user.id,
         get_user(c.from_user.id) or {},
         "",
+        live_username=c.from_user.username,
     )
 
 # Обработчик кнопки Start удален - теперь обычные пользователи сразу видят полное меню
@@ -7241,7 +7790,7 @@ async def otd_pick_machine_kind(c: CallbackQuery, state: FSMContext):
         await state.update_data(otd=work)
         await state.set_state(OtdFSM.pick_crop)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                            "Груз:", reply_markup=otd_crops_kb(kamaz=True))
+                            "Культура:", reply_markup=otd_crops_kb(kamaz=True))
         await c.answer()
         return
 
@@ -7401,7 +7950,7 @@ async def otd_pick_hand(c: CallbackQuery, state: FSMContext):
     work["act_grp"] = GROUP_HAND
     work["machine_type"] = "Ручная"
     work["machine_name"] = None
-    # Для ручных работ тоже спрашиваем локацию (как для трактора):
+    # Для ручных работ тоже спрашиваем поле (как для трактора):
     work["field_back"] = "hand"
     await state.update_data(otd=work)
     await state.set_state(OtdFSM.pick_location)
@@ -7409,7 +7958,7 @@ async def otd_pick_hand(c: CallbackQuery, state: FSMContext):
         c.bot,
         c.message.chat.id,
         c.from_user.id,
-        "Выберите локацию:",
+        "Выберите поле:",
         reply_markup=otd_fields_kb("otd:field"),
     )
     await c.answer()
@@ -7454,7 +8003,7 @@ async def otd_pick_activity_custom(message: Message, state: FSMContext):
         await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
                             "Поле:", reply_markup=otd_fields_kb("otd:field"))
     else:
-        # Ручная — тоже просим локацию
+        # Ручная — тоже просим поле
         work["field_back"] = "hand"
         await state.update_data(otd=work)
         await state.set_state(OtdFSM.pick_location)
@@ -7462,7 +8011,7 @@ async def otd_pick_activity_custom(message: Message, state: FSMContext):
             message.bot,
             message.chat.id,
             message.from_user.id,
-            "Выберите локацию:",
+            "Выберите поле:",
             reply_markup=otd_fields_kb("otd:field"),
         )
 
@@ -7488,9 +8037,13 @@ async def otd_pick_crop(c: CallbackQuery, state: FSMContext):
     work["crop"] = crop
     await state.update_data(otd=work)
     if work.get("machine_type") == "КамАЗ":
-        await state.set_state(OtdFSM.pick_trips)
+        work["field_back"] = "kamaz"
+        await state.update_data(otd=work)
+        await state.set_state(OtdFSM.pick_location)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                            "Сколько рейсов? Введите число:")
+                            "Поле:", reply_markup=otd_fields_kb("otd:load"))
+        await c.answer()
+        return
     elif work.get("machine_type") == "Трактор":
         await _otd_to_confirm(c.bot, c.message.chat.id, c.from_user.id, state)
     elif work.get("act_grp") == GROUP_HAND:
@@ -7504,7 +8057,7 @@ async def otd_pick_crop(c: CallbackQuery, state: FSMContext):
                 c.bot,
                 c.message.chat.id,
                 c.from_user.id,
-                "Выберите локацию:",
+                "Выберите поле:",
                 reply_markup=otd_fields_kb("otd:field"),
             )
             await c.answer()
@@ -7550,9 +8103,12 @@ async def otd_pick_crop_custom(message: Message, state: FSMContext):
 
     # дальше — как в otd_pick_crop
     if work.get("machine_type") == "КамАЗ":
-        await state.set_state(OtdFSM.pick_trips)
+        work["field_back"] = "kamaz"
+        await state.update_data(otd=work)
+        await state.set_state(OtdFSM.pick_location)
         await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
-                            "Сколько рейсов? Введите число:")
+                            "Поле:", reply_markup=otd_fields_kb("otd:load"))
+        return
     elif work.get("machine_type") == "Трактор":
         await _otd_to_confirm(message.bot, message.chat.id, message.from_user.id, state)
     elif work.get("act_grp") == GROUP_HAND:
@@ -7581,7 +8137,7 @@ async def otd_pick_trips(message: Message, state: FSMContext):
     await state.update_data(otd=work)
     await state.set_state(OtdFSM.pick_location)
     await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
-                        "Место погрузки:", reply_markup=otd_fields_kb("otd:load"))
+                        "Поле:", reply_markup=otd_fields_kb("otd:load"))
 
 @router.callback_query(F.data.startswith("otd:load:"))
 async def otd_pick_load(c: CallbackQuery, state: FSMContext):
@@ -7683,10 +8239,8 @@ async def otd_confirm_ok(c: CallbackQuery, state: FSMContext):
     work = data.get("otd", {})
     # Для КамАЗа (machine_mode=single) нет выбора "Работа", поэтому activity не требуем.
     if work.get("machine_mode") == "single":
-        if not work.get("work_date") or not work.get("hours") or not work.get("crop"):
-            await c.answer("Не все данные заполнены", show_alert=True)
-            return
-        if work.get("trips") is None or not (work.get("location") or "").strip():
+        if not work.get("work_date") or not work.get("hours") or not work.get("crop") \
+                or not (work.get("location") or "").strip():
             await c.answer("Не все данные заполнены", show_alert=True)
             return
     else:
@@ -8337,7 +8891,7 @@ async def brig_kamaz_trips(message: Message, state: FSMContext):
     kb.button(text="🔙 Назад", callback_data="brig:back:ktrips")
     kb.adjust(2)
     await _edit_or_send(message.bot, message.chat.id, message.from_user.id,
-                        "Место погрузки:", reply_markup=kb.as_markup())
+                        "Поле:", reply_markup=kb.as_markup())
 
 @router.callback_query(F.data == "brig:back:ktrips")
 async def brig_back_ktrips(c: CallbackQuery, state: FSMContext):
@@ -8373,7 +8927,7 @@ async def brig_kamaz_load(c: CallbackQuery, state: FSMContext):
             f"Смена: {brig.get('shift')}\n"
             f"Культура: {brig.get('machine_crop')}\n"
             f"Рейсов: {brig.get('trips')}\n"
-            f"Место погрузки: {brig.get('field')}\n"
+            f"Поле: {brig.get('field')}\n"
             f"Техника: КамАЗ"
         )
         kb = InlineKeyboardBuilder()
@@ -8396,7 +8950,7 @@ async def brig_back_kload(c: CallbackQuery, state: FSMContext):
     kb.button(text="🔙 Назад", callback_data="brig:back:ktrips")
     kb.adjust(2)
     await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                        "Место погрузки:", reply_markup=kb.as_markup())
+                        "Поле:", reply_markup=kb.as_markup())
     await c.answer()
 
 @router.message(BrigFSM.pick_kamaz_load_custom)
@@ -8427,7 +8981,7 @@ async def brig_kamaz_load_custom(message: Message, state: FSMContext):
         f"Смена: {brig.get('shift')}\n"
         f"Культура: {brig.get('machine_crop')}\n"
         f"Рейсов: {brig.get('trips')}\n"
-        f"Место погрузки: {brig.get('field')}\n"
+        f"Поле: {brig.get('field')}\n"
         f"Техника: КамАЗ"
     )
     kb = InlineKeyboardBuilder()
@@ -8883,7 +9437,7 @@ async def brig_confirm_back(c: CallbackQuery, state: FSMContext):
         kb.button(text="🔙 Назад", callback_data="brig:back:ktrips")
         kb.adjust(2)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
-                            "Место погрузки:", reply_markup=kb.as_markup())
+                            "Поле:", reply_markup=kb.as_markup())
     else:
         await state.set_state(BrigFSM.pick_field)
         await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
@@ -9931,6 +10485,536 @@ async def adm_role_del_brig_pick(c: CallbackQuery, state: FSMContext):
     )
     await c.answer("Готово")
 
+# -------------- Управление ролью Бухгалтер --------------
+
+@router.callback_query(F.data == "adm:role:add:acct")
+async def adm_role_add_acct(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    await state.set_state(AdminFSM.add_acct_id)
+    await _edit_or_send(
+        c.bot, c.message.chat.id, c.from_user.id,
+        "Введите @username или выберите из списка:",
+        reply_markup=admin_role_add_acct_kb(page=0),
+    )
+    await c.answer()
+
+@router.message(AdminFSM.add_acct_id)
+async def adm_role_add_acct_value(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    target_id = None
+    try:
+        target_id = int(raw)
+    except ValueError:
+        u = find_user_by_username(raw)
+        if u:
+            target_id = u["user_id"]
+    if not target_id:
+        await message.answer("Введите @username или выберите из списка:",
+                             reply_markup=admin_role_add_acct_kb(page=0))
+        return
+    set_role(target_id, "accountant", message.from_user.id)
+    await state.clear()
+    tu = get_user(target_id) or {}
+    who = _display_user(tu.get("full_name"), tu.get("username"), target_id)
+    await message.answer(f"✅ Роль бухгалтера выдана: <b>{who}</b>",
+                         reply_markup=admin_menu_kb())
+
+@router.callback_query(F.data == "adm:role:del:acct")
+async def adm_role_del_acct(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    await state.set_state(AdminFSM.del_acct_id)
+    await _edit_or_send(
+        c.bot, c.message.chat.id, c.from_user.id,
+        "Выберите бухгалтера из списка или введите @username:",
+        reply_markup=admin_role_del_acct_kb(page=0),
+    )
+    await c.answer()
+
+@router.message(AdminFSM.del_acct_id)
+async def adm_role_del_acct_value(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    target_id = None
+    try:
+        target_id = int(raw)
+    except ValueError:
+        u = find_user_by_username(raw)
+        if u:
+            target_id = u["user_id"]
+    if not target_id:
+        await message.answer("Выберите бухгалтера из списка или введите @username:",
+                             reply_markup=admin_role_del_acct_kb(page=0))
+        return
+    clear_role(target_id, "accountant")
+    await state.clear()
+    tu = get_user(target_id) or {}
+    who = _display_user(tu.get("full_name"), tu.get("username"), target_id)
+    await message.answer(f"✅ Роль бухгалтера снята: <b>{who}</b>",
+                         reply_markup=admin_menu_kb())
+
+@router.callback_query(F.data.startswith("adm:role:add:acct:page:"))
+async def adm_role_add_acct_page(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        page = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        page = 0
+    await state.set_state(AdminFSM.add_acct_id)
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Введите @username или выберите из списка:",
+                        reply_markup=admin_role_add_acct_kb(page=page))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:role:del:acct:page:"))
+async def adm_role_del_acct_page(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        page = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        page = 0
+    await state.set_state(AdminFSM.del_acct_id)
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        "Выберите бухгалтера из списка или введите @username:",
+                        reply_markup=admin_role_del_acct_kb(page=page))
+    await c.answer()
+
+@router.callback_query(F.data.startswith("adm:role:add:acct:pick:"))
+async def adm_role_add_acct_pick(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        target_id = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    set_role(target_id, "accountant", c.from_user.id)
+    await state.clear()
+    tu = get_user(target_id) or {}
+    who = _display_user(tu.get("full_name"), tu.get("username"), target_id)
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"✅ Роль бухгалтера выдана: <b>{who}</b>",
+                        reply_markup=admin_roles_kb())
+    await c.answer("Готово")
+
+@router.callback_query(F.data.startswith("adm:role:del:acct:pick:"))
+async def adm_role_del_acct_pick(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c):
+        await c.answer("Нет прав", show_alert=True)
+        return
+    try:
+        target_id = int(c.data.rsplit(":", 1)[1])
+    except Exception:
+        await c.answer("Некорректный выбор", show_alert=True)
+        return
+    clear_role(target_id, "accountant")
+    await state.clear()
+    tu = get_user(target_id) or {}
+    who = _display_user(tu.get("full_name"), tu.get("username"), target_id)
+    await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                        f"✅ Роль бухгалтера снята: <b>{who}</b>",
+                        reply_markup=admin_roles_kb())
+    await c.answer("Готово")
+
+# -------------- Бухгалтерский учёт (Учёт) --------------
+
+def _is_acct_or_admin(user_id: int) -> bool:
+    role = get_role_label(user_id)
+    return role in ("admin", "accountant")
+
+def _parse_date_input(raw: str) -> Optional[str]:
+    """Парсит дату из форматов DD.MM.YYYY / DD/MM/YYYY / YYYY-MM-DD → 'YYYY-MM-DD' или None."""
+    raw = (raw or "").strip()
+    import re as _re
+    for pat in [
+        r"^(\d{2})\.(\d{2})\.(\d{4})$",
+        r"^(\d{2})/(\d{2})/(\d{4})$",
+    ]:
+        m = _re.match(pat, raw)
+        if m:
+            d, mo, y = m.groups()
+            try:
+                from datetime import date as _date
+                _date(int(y), int(mo), int(d))
+                return f"{y}-{mo}-{d}"
+            except ValueError:
+                return None
+    m = _re.match(r"^(\d{4})-(\d{2})-(\d{2})$", raw)
+    if m:
+        y, mo, d = m.groups()
+        try:
+            from datetime import date as _date
+            _date(int(y), int(mo), int(d))
+            return f"{y}-{mo}-{d}"
+        except ValueError:
+            return None
+    return None
+
+# ---- Вспомогательная функция: inline-календарь ----
+
+import calendar as _cal_mod
+
+_MN_SHORT = ["","Янв","Фев","Мар","Апр","Май","Июн","Июл","Авг","Сен","Окт","Ноя","Дек"]
+_MN_FULL  = ["","Январь","Февраль","Март","Апрель","Май","Июнь",
+             "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"]
+
+
+def _acct_cal_kb(year: int, month: int, ctx: str) -> InlineKeyboardMarkup:
+    """Inline-календарь — вид: сетка дней.
+    Callback patterns:
+      cal:{ctx}:nav:{YYYY-MM}        – навигация к месяцу (листание)
+      cal:{ctx}:day:{YYYY-MM-DD}     – выбор дня
+      cal:{ctx}:monthpick:{YYYY}     – открыть выбор месяца
+      cal:{ctx}:yearpick:{YYYY}-{MM} – открыть выбор года
+      cal:noop
+    """
+    from datetime import date as _dt_date
+    today = _dt_date.today()
+    builder = InlineKeyboardBuilder()
+
+    # --- строка: год (кликабельный) ---
+    py = f"{year-1}-{month:02d}"
+    ny = f"{year+1}-{month:02d}"
+    builder.row(
+        InlineKeyboardButton(text="◀", callback_data=f"cal:{ctx}:nav:{py}"),
+        InlineKeyboardButton(text=f"  {year}  ", callback_data=f"cal:{ctx}:yearpick:{year}-{month:02d}"),
+        InlineKeyboardButton(text="▶", callback_data=f"cal:{ctx}:nav:{ny}"),
+    )
+
+    # --- строка: месяц (кликабельный) + листание по кругу ---
+    pm = f"{year}-{(month-2)%12+1:02d}"   # круговое: янв-1 → дек того же года
+    nm = f"{year}-{month%12+1:02d}"        # круговое: дек+1 → янв того же года
+    builder.row(
+        InlineKeyboardButton(text="◀", callback_data=f"cal:{ctx}:nav:{pm}"),
+        InlineKeyboardButton(text=f"  {_MN_SHORT[month]}  ", callback_data=f"cal:{ctx}:monthpick:{year}"),
+        InlineKeyboardButton(text="▶", callback_data=f"cal:{ctx}:nav:{nm}"),
+    )
+
+    # --- дни недели ---
+    builder.row(*[
+        InlineKeyboardButton(text=d, callback_data="cal:noop")
+        for d in ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]
+    ])
+
+    # --- сетка дней ---
+    for week in _cal_mod.monthcalendar(year, month):
+        row_btns = []
+        for day in week:
+            if day == 0:
+                row_btns.append(InlineKeyboardButton(text=" ", callback_data="cal:noop"))
+            else:
+                d_str = f"{year}-{month:02d}-{day:02d}"
+                label = f"·{day}·" if _dt_date(year, month, day) == today else str(day)
+                row_btns.append(InlineKeyboardButton(text=label, callback_data=f"cal:{ctx}:day:{d_str}"))
+        builder.row(*row_btns)
+
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="menu:root"))
+    return builder.as_markup()
+
+
+def _acct_cal_months_kb(year: int, ctx: str) -> InlineKeyboardMarkup:
+    """Сетка 12 месяцев для выбора месяца."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=f"── {year} ──", callback_data="cal:noop"))
+    row_btns = []
+    for m in range(1, 13):
+        row_btns.append(
+            InlineKeyboardButton(text=_MN_FULL[m], callback_data=f"cal:{ctx}:selmonth:{year}-{m:02d}")
+        )
+    # 3 кнопки в ряд
+    for i in range(0, 12, 3):
+        builder.row(*row_btns[i:i+3])
+    builder.row(InlineKeyboardButton(text="◀ Назад", callback_data=f"cal:{ctx}:nav:{year}-01"))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="menu:root"))
+    return builder.as_markup()
+
+
+def _acct_cal_years_kb(center_year: int, month: int, ctx: str) -> InlineKeyboardMarkup:
+    """Сетка годов: center_year ± 15 для выбора года."""
+    builder = InlineKeyboardBuilder()
+    years = list(range(center_year - 15, center_year + 16))
+    row_btns = []
+    for y in years:
+        label = f"[{y}]" if y == center_year else str(y)
+        row_btns.append(
+            InlineKeyboardButton(text=label, callback_data=f"cal:{ctx}:selyear:{y}-{month:02d}")
+        )
+    # 5 кнопок в ряд
+    for i in range(0, len(row_btns), 5):
+        builder.row(*row_btns[i:i+5])
+    builder.row(InlineKeyboardButton(text="◀ Назад", callback_data=f"cal:{ctx}:nav:{center_year}-{month:02d}"))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="menu:root"))
+    return builder.as_markup()
+
+
+async def _acct_generate_and_send(bot, chat_id: int, date_from: str, date_to: str):
+    """Генерирует и отправляет Excel-отчёт."""
+    d1, mo1, y1 = date_from[8:10], date_from[5:7], date_from[:4]
+    d2, mo2, y2 = date_to[8:10], date_to[5:7], date_to[:4]
+
+    await _edit_or_send(bot, chat_id, chat_id,
+        f"⏳ Формирую отчёт за <b>{d1}.{mo1}.{y1}</b> — <b>{d2}.{mo2}.{y2}</b>...\n"
+        f"<i>Читаю данные из Google Sheets...</i>")
+
+    # Получаем данные с мета-информацией
+    try:
+        reports, found_sheets, not_found_sheets = await asyncio.get_event_loop().run_in_executor(
+            None, get_reports_from_sheets_for_period_with_meta, date_from, date_to
+        )
+    except Exception as e:
+        logging.error(f"[acct] Ошибка чтения Google Sheets: {e}")
+        reports, found_sheets, not_found_sheets = [], [], []
+
+    # Генерируем Excel из уже полученных данных
+    try:
+        excel_bytes = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _build_excel_from_records(reports, date_from, date_to)
+        )
+    except Exception as e:
+        logging.error(f"Ошибка генерации Excel: {e}")
+        excel_bytes = None
+
+    if not excel_bytes:
+        await _edit_or_send(
+            bot, chat_id, chat_id,
+            "❌ Не удалось сформировать отчёт.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🔙 Назад", callback_data="menu:root")
+            ]]),
+        )
+        return
+
+    from aiogram.types import BufferedInputFile
+    filename = f"otd_{date_from}_{date_to}.xlsx"
+    doc = BufferedInputFile(excel_bytes, filename=filename)
+
+    sheets_info = ""
+    if found_sheets:
+        sheets_info += "\n📋 Листы: " + ", ".join(found_sheets)
+    if not_found_sheets:
+        sheets_info += "\n⚠️ Не найдено: " + ", ".join(not_found_sheets)
+
+    caption = (
+        f"🧾 <b>Отчет ЗП-ОТД</b>\n"
+        f"Период: <b>{d1}.{mo1}.{y1}</b> — <b>{d2}.{mo2}.{y2}</b>\n"
+        f"Записей: <b>{len(reports)}</b>"
+        f"{sheets_info}"
+    )
+    try:
+        await bot.send_document(chat_id=chat_id, document=doc, caption=caption, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Ошибка отправки Excel: {e}")
+        return
+
+    await _edit_or_send(
+        bot, chat_id, chat_id,
+        "✅ Файл отправлен.\n\nНажмите кнопку для возврата в меню:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:root")
+        ]]),
+    )
+
+
+_ACCT_TITLE = "🧾 <b>Отчет ЗП-ОТД</b>"
+
+
+def _acct_header(is_from: bool, date_from: str = "") -> str:
+    if is_from:
+        return f"{_ACCT_TITLE}\n\nВыберите <b>дату начала</b> периода или введите вручную (дд.мм.гггг):"
+    if date_from:
+        d0, mo0, y0 = date_from[8:10], date_from[5:7], date_from[:4]
+        return f"{_ACCT_TITLE}\n\n✅ Начало: <b>{d0}.{mo0}.{y0}</b>\n\nВыберите <b>дату конца</b> или введите вручную (дд.мм.гггг):"
+    return f"{_ACCT_TITLE}\n\nВыберите <b>дату конца</b> периода или введите вручную (дд.мм.гггг):"
+
+
+@router.callback_query(F.data == "acct:start")
+async def acct_start(c: CallbackQuery, state: FSMContext):
+    if not _is_acct_or_admin(c.from_user.id):
+        await c.answer("Нет доступа", show_alert=True)
+        return
+    from datetime import date as _dt
+    today = _dt.today()
+    await state.set_state(AccountantFSM.pick_date_from)
+    await state.update_data(cal_year=today.year, cal_month=today.month)
+    await _edit_or_send(
+        c.bot, c.message.chat.id, c.from_user.id,
+        _acct_header(True),
+        reply_markup=_acct_cal_kb(today.year, today.month, "from"),
+    )
+    await c.answer()
+
+
+@router.callback_query(
+    StateFilter(AccountantFSM.pick_date_from, AccountantFSM.pick_date_to),
+    F.data.startswith("cal:")
+)
+async def acct_calendar_cb(c: CallbackQuery, state: FSMContext):
+    """Обработчик всех нажатий в календаре выбора даты."""
+    parts = c.data.split(":")
+    if len(parts) < 3:
+        await c.answer(); return
+
+    action = parts[2]
+
+    if action == "noop":
+        await c.answer(); return
+
+    current_state = await state.get_state()
+    is_from = (current_state == AccountantFSM.pick_date_from.state or
+               current_state == AccountantFSM.pick_date_from)
+    ctx = "from" if is_from else "to"
+    data = await state.get_data()
+    date_from = data.get("acct_date_from", "")
+
+    # ---- навигация к месяцу ----
+    if action == "nav" and len(parts) >= 4:
+        nav = parts[3]  # YYYY-MM
+        try:
+            y, m = int(nav[:4]), int(nav[5:7])
+        except ValueError:
+            await c.answer(); return
+        await state.update_data(cal_year=y, cal_month=m)
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            _acct_header(is_from, date_from),
+                            reply_markup=_acct_cal_kb(y, m, ctx))
+        await c.answer(); return
+
+    # ---- открыть выбор месяца ----
+    if action == "monthpick" and len(parts) >= 4:
+        try:
+            y = int(parts[3])
+        except ValueError:
+            await c.answer(); return
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            _acct_header(is_from, date_from),
+                            reply_markup=_acct_cal_months_kb(y, ctx))
+        await c.answer(); return
+
+    # ---- открыть выбор года ----
+    if action == "yearpick" and len(parts) >= 4:
+        nav = parts[3]  # YYYY-MM
+        try:
+            y, m = int(nav[:4]), int(nav[5:7])
+        except ValueError:
+            await c.answer(); return
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            _acct_header(is_from, date_from),
+                            reply_markup=_acct_cal_years_kb(y, m, ctx))
+        await c.answer(); return
+
+    # ---- выбрать месяц из сетки ----
+    if action == "selmonth" and len(parts) >= 4:
+        nav = parts[3]  # YYYY-MM
+        try:
+            y, m = int(nav[:4]), int(nav[5:7])
+        except ValueError:
+            await c.answer(); return
+        await state.update_data(cal_year=y, cal_month=m)
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            _acct_header(is_from, date_from),
+                            reply_markup=_acct_cal_kb(y, m, ctx))
+        await c.answer(); return
+
+    # ---- выбрать год из сетки ----
+    if action == "selyear" and len(parts) >= 4:
+        nav = parts[3]  # YYYY-MM
+        try:
+            y, m = int(nav[:4]), int(nav[5:7])
+        except ValueError:
+            await c.answer(); return
+        await state.update_data(cal_year=y, cal_month=m)
+        await _edit_or_send(c.bot, c.message.chat.id, c.from_user.id,
+                            _acct_header(is_from, date_from),
+                            reply_markup=_acct_cal_kb(y, m, ctx))
+        await c.answer(); return
+
+    # ---- выбор дня ----
+    if action == "day" and len(parts) >= 4:
+        date_str = parts[3]  # YYYY-MM-DD
+        if not _parse_date_input(date_str):
+            await c.answer("Некорректная дата", show_alert=True); return
+
+        if is_from:
+            await state.update_data(acct_date_from=date_str)
+            await state.set_state(AccountantFSM.pick_date_to)
+            y = int(date_str[:4]); m = int(date_str[5:7])
+            await state.update_data(cal_year=y, cal_month=m)
+            await _edit_or_send(
+                c.bot, c.message.chat.id, c.from_user.id,
+                _acct_header(False, date_str),
+                reply_markup=_acct_cal_kb(y, m, "to"),
+            )
+        else:
+            if date_str < date_from:
+                d0, mo0, y0 = date_from[8:10], date_from[5:7], date_from[:4]
+                await c.answer(f"Дата конца не может быть раньше {d0}.{mo0}.{y0}", show_alert=True)
+                return
+            await state.clear()
+            await _acct_generate_and_send(c.bot, c.message.chat.id, date_from, date_str)
+        await c.answer(); return
+
+    await c.answer()
+
+
+@router.message(StateFilter(AccountantFSM.pick_date_from, AccountantFSM.pick_date_to))
+async def acct_manual_date_input(message: Message, state: FSMContext):
+    """Ручной ввод даты в формате дд.мм.гггг на любом шаге выбора даты."""
+    await _ui_try_delete_user_message(message)
+    raw = (message.text or "").strip()
+    parsed = _parse_date_input(raw)
+    data = await state.get_data()
+
+    current_state = await state.get_state()
+    is_from = (current_state == AccountantFSM.pick_date_from.state or
+               current_state == AccountantFSM.pick_date_from)
+    date_from = data.get("acct_date_from", "")
+
+    if not parsed:
+        y = data.get("cal_year") or __import__("datetime").date.today().year
+        m = data.get("cal_month") or __import__("datetime").date.today().month
+        ctx = "from" if is_from else "to"
+        await _edit_or_send(
+            message.bot, message.chat.id, message.from_user.id,
+            f"⚠️ Неверный формат. Введите дату как <b>дд.мм.гггг</b> или выберите на календаре.\n\n"
+            + _acct_header(is_from, date_from),
+            reply_markup=_acct_cal_kb(int(y), int(m), ctx),
+        )
+        return
+
+    if is_from:
+        await state.update_data(acct_date_from=parsed)
+        await state.set_state(AccountantFSM.pick_date_to)
+        y, m = int(parsed[:4]), int(parsed[5:7])
+        await state.update_data(cal_year=y, cal_month=m)
+        await _edit_or_send(
+            message.bot, message.chat.id, message.from_user.id,
+            _acct_header(False, parsed),
+            reply_markup=_acct_cal_kb(y, m, "to"),
+        )
+    else:
+        if parsed < date_from:
+            y = data.get("cal_year") or int(date_from[:4])
+            m = data.get("cal_month") or int(date_from[5:7])
+            d0, mo0, y0 = date_from[8:10], date_from[5:7], date_from[:4]
+            await _edit_or_send(
+                message.bot, message.chat.id, message.from_user.id,
+                f"⚠️ Дата конца не может быть раньше начала ({d0}.{mo0}.{y0}).\n\n"
+                + _acct_header(False, date_from),
+                reply_markup=_acct_cal_kb(int(y), int(m), "to"),
+            )
+            return
+        await state.clear()
+        await _acct_generate_and_send(message.bot, message.chat.id, date_from, parsed)
+
+
+# ---- конец блока Учёт ----
 # -------------- Изменение имени --------------
 
 @router.callback_query(F.data == "menu:name")
@@ -10420,7 +11504,7 @@ async def pick_hours(c: CallbackQuery, state: FSMContext):
     work = data.get("work", {})
     if not all(k in work for k in ("grp","activity","loc_grp","location","work_date")):
         await c.answer("Что-то пошло не так. Начните заново.", show_alert=True)
-        await show_main_menu(c.message.chat.id, c.from_user.id, get_user(c.from_user.id), "Меню")
+        await show_main_menu(c.message.chat.id, c.from_user.id, get_user(c.from_user.id), "Меню", live_username=c.from_user.username)
         return
 
     # проверка лимита 24 часа
@@ -11549,7 +12633,7 @@ async def any_text(message: Message):
         return
     _maybe_update_last_chat_id(message)
     u = get_user(message.from_user.id)
-    await show_main_menu(message.chat.id, message.from_user.id, u, "Меню")
+    await show_main_menu(message.chat.id, message.from_user.id, u, "Меню", live_username=message.from_user.username)
 
 
 def _sum_hours_for_user_range(user_id: int, start: date, end: date) -> int:
