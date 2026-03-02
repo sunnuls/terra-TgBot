@@ -4638,6 +4638,50 @@ def _build_excel_from_records(reports: List[dict], date_from: str = "", date_to:
     ws.column_dimensions["B"].width = min(max_name + 4, 45)
     ws.column_dimensions["C"].width = 10
 
+    # ================================================================
+    # --- Вторая вкладка: детальный список записей по дате работы ---
+    # ================================================================
+    ws2 = wb.create_sheet(title="Детализация")
+
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+
+    detail_headers = ["№", "Дата работы", "Имя", "Поле", "Вид работы", "Техника", "Культура", "Часы"]
+    col_widths     = [5,    14,             30,    20,     20,            20,         15,          8]
+
+    for col_idx, (h, w) in enumerate(zip(detail_headers, col_widths), 1):
+        cell = ws2.cell(row=1, column=col_idx, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center
+        cell.border = border
+        ws2.column_dimensions[get_column_letter(col_idx)].width = w
+
+    # Сортируем по дате работы, затем по имени
+    sorted_reports = sorted(
+        reports,
+        key=lambda r: (r.get("work_date") or "", r.get("name") or "")
+    )
+
+    for row_num, rep in enumerate(sorted_reports, 2):
+        work_date = rep.get("work_date") or ""
+        row_data = [
+            row_num - 1,
+            _fmt(work_date) if len(work_date) == 10 else work_date,
+            rep.get("name") or "",
+            rep.get("location") or "",
+            rep.get("work_kind") or rep.get("hand_work") or "",
+            rep.get("tech_name") or rep.get("tech_kind") or "",
+            rep.get("crop") or "",
+            rep.get("hours") or 0,
+        ]
+        for col_idx, val in enumerate(row_data, 1):
+            cell = ws2.cell(row=row_num, column=col_idx, value=val)
+            cell.border = border
+            cell.alignment = center if col_idx in (1, 2, 8) else left
+
+    ws2.freeze_panes = "A2"
+
     import io as _io
     buf = _io.BytesIO()
     wb.save(buf)

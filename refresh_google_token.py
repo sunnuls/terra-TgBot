@@ -14,7 +14,7 @@ from google.oauth2.credentials import Credentials
 load_dotenv()
 
 SCOPES = [
-    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
