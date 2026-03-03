@@ -4949,12 +4949,12 @@ def export_reports_to_sheets():
         # Группируем отчеты по месяцам
         reports_by_month = {}
         for row in all_reports:
-            report_id, created_at, phone, name, location, activity, work_date, hours, is_exported, row_number, last_updated = row
+            report_id, created_at, phone, name, location, activity, work_date, hours, is_exported, row_number, last_updated, machine_type, machine_name, crop = row
             d = datetime.fromisoformat(work_date)
             key = (d.year, d.month)
             if key not in reports_by_month:
                 reports_by_month[key] = []
-            reports_by_month[key].append((report_id, created_at, phone, name, location, activity, work_date, hours, is_exported, row_number, last_updated))
+            reports_by_month[key].append((report_id, created_at, phone, name, location, activity, work_date, hours, is_exported, row_number, last_updated, machine_type, machine_name, crop))
         
         total_exported = 0
         total_updated = 0
