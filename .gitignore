@@ -58,3 +58,8 @@ bot_log.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Local junk / dumps
+dump.rdb
+bot_out.txt
+speedtest.bin

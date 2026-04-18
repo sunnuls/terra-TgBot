@@ -1,0 +1,27 @@
+# Traccar — приём GPS/GSM трекеров по многим протоколам (TCP).
+# Документация: https://www.traccar.org/
+#
+# Запуск на сервере (рядом с Terra или на отдельной ВМ):
+#   cd telemetry && docker compose -f docker-compose.traccar.yml up -d
+#
+# В Yandex Cloud / DO: в группе безопасности открыть:
+#   - TCP 8082 — веб-интерфейс Traccar (лучше не светить в интернет; доступ по VPN или только с вашего IP)
+#   - TCP порт протокола вашего трекера (см. список протоколов в Traccar после установки; часто один порт на тип устройства)
+#
+# После первого входа смените пароль admin. Устройство в Traccar создайте с IMEI с корпуса трекера.
+
+services:
+  traccar:
+    image: traccar/traccar:latest
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+      # Диапазон портов под разные протоколы (при необходимости сузьте до одного порта из документации к трекеру)
+      - "5000-5150:5000-5150"
+    volumes:
+      - traccar_data:/opt/traccar/data
+      - traccar_logs:/opt/traccar/logs
+
+volumes:
+  traccar_data:
+  traccar_logs:

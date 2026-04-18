@@ -1,0 +1,49 @@
+# Codemagic: iOS через Expo EAS (облачная сборка на серверах Expo).
+# Настройка в UI Codemagic:
+# 1) Подключите репозиторий.
+# 2) Environment variables → создайте группу, например "expo", добавьте:
+#    EXPO_TOKEN — https://expo.dev/accounts/[account]/settings/access-tokens
+# 3) Один раз локально: cd mobile && npx eas login && npx eas init
+#    (в app.json появится extra.eas.projectId — закоммитьте).
+# 4) В workflow укажите эту группу переменных (см. environment.groups ниже).
+
+workflows:
+  eas-ios:
+    name: TerraApp iOS (EAS)
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    environment:
+      groups:
+        - expo
+      node: 22
+    scripts:
+      - name: Install dependencies
+        script: |
+          set -e
+          cd mobile
+          npm ci
+      - name: EAS Build iOS
+        script: |
+          set -e
+          cd mobile
+          npx eas-cli build --platform ios --profile production --non-interactive
+
+  eas-ios-simulator:
+    name: TerraApp iOS Simulator (EAS preview)
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    environment:
+      groups:
+        - expo
+      node: 22
+    scripts:
+      - name: Install dependencies
+        script: |
+          set -e
+          cd mobile
+          npm ci
+      - name: EAS Build iOS (simulator)
+        script: |
+          set -e
+          cd mobile
+          npx eas-cli build --platform ios --profile preview --non-interactive

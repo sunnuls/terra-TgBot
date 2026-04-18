@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "TerraApp",
+    "slug": "terra-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1a5c2e"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.terraapp.mobile"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1a5c2e"
+      },
+      "package": "com.terraapp.mobile"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#1a5c2e"
+        }
+      ]
+    ],
+    "scheme": "terraapp",
+    "extra": {
+      "API_URL": "http://192.168.137.1:8000/api/v1"
+    }
+  }
+}
