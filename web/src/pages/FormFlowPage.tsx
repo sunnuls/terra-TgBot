@@ -198,7 +198,7 @@ function flowToRF(flow: FormFlow): { nodes: Node[]; edges: Edge[] } {
 // ─── Convert back RF state → FlowNode[] ────────────────────────────────
 function rfToFlow(rfNodes: Node[], rfEdges: Edge[], startId: string): FormFlow {
   const nodes: FlowNode[] = rfNodes.map((n) => {
-    const data = n.data as FlowNode;
+    const data = n.data as unknown as FlowNode;
     const outEdges = rfEdges.filter((e) => e.source === n.id);
     const conditionalEdges = outEdges.filter((e) => e.label);
     const defaultEdge = outEdges.find((e) => !e.label);
@@ -221,7 +221,7 @@ function rfToFlow(rfNodes: Node[], rfEdges: Edge[], startId: string): FormFlow {
 
 // ─── Custom Node Component ────────────────────────────────────────────────
 function StepNode({ data, selected }: NodeProps) {
-  const d = data as FlowNode & { isSwapSource?: boolean };
+  const d = data as unknown as FlowNode & { isSwapSource?: boolean };
   const isStart = d.type === "start";
   const isConfirm = d.type === "confirm";
   const { dictMap } = React.useContext(DictContext);
@@ -314,7 +314,7 @@ function NodeEditPanel({
   onClose: () => void;
   onSetChain: (nodeId: string, item: string, seqNodeIds: string[]) => void;
 }) {
-  const d = node.data as FlowNode;
+  const d = node.data as unknown as FlowNode;
   const { dictMap, customDictMeta, kindModes } = React.useContext(DictContext);
 
   // Build dynamic sources — add per-kind machine_items + custom dicts
@@ -568,7 +568,7 @@ function NodeEditPanel({
                               >
                                 <option value="">→ (не задан)</option>
                                 {otherNodes.map((n) => (
-                                  <option key={n.id} value={n.id}>{(n.data as FlowNode).label}</option>
+                                  <option key={n.id} value={n.id}>{(n.data as unknown as FlowNode).label}</option>
                                 ))}
                               </select>
                             )}
@@ -596,7 +596,7 @@ function NodeEditPanel({
                                     >
                                       <option value="">— выберите шаг —</option>
                                       {otherNodes.map((n) => (
-                                        <option key={n.id} value={n.id}>{(n.data as FlowNode).label}</option>
+                                        <option key={n.id} value={n.id}>{(n.data as unknown as FlowNode).label}</option>
                                       ))}
                                     </select>
                                     <button
@@ -639,7 +639,7 @@ function NodeEditPanel({
                       <select className="input text-xs" value={defaultNext} onChange={(e) => setDefaultNext(e.target.value)}>
                         <option value="">— нет —</option>
                         {otherNodes.map((n) => (
-                          <option key={n.id} value={n.id}>{(n.data as FlowNode).label}</option>
+                          <option key={n.id} value={n.id}>{(n.data as unknown as FlowNode).label}</option>
                         ))}
                       </select>
                     </div>
@@ -655,7 +655,7 @@ function NodeEditPanel({
                       <select className="input text-sm" value={defaultNext} onChange={(e) => setDefaultNext(e.target.value)}>
                         <option value="">— не задан —</option>
                         {otherNodes.map((n) => (
-                          <option key={n.id} value={n.id}>{(n.data as FlowNode).label}</option>
+                          <option key={n.id} value={n.id}>{(n.data as unknown as FlowNode).label}</option>
                         ))}
                       </select>
                     </div>
@@ -706,7 +706,7 @@ function NodeEditPanel({
                                     >
                                       <option value="">— не задан —</option>
                                       {otherNodes.map((n) => (
-                                        <option key={n.id} value={n.id}>{(n.data as FlowNode).label}</option>
+                                        <option key={n.id} value={n.id}>{(n.data as unknown as FlowNode).label}</option>
                                       ))}
                                     </select>
                                   </div>
@@ -744,7 +744,7 @@ function NodeEditPanel({
                         >
                           <option value="">→ (не задан)</option>
                           {otherNodes.map((n) => (
-                            <option key={n.id} value={n.id}>{(n.data as FlowNode).label}</option>
+                            <option key={n.id} value={n.id}>{(n.data as unknown as FlowNode).label}</option>
                           ))}
                         </select>
                       </div>
@@ -773,7 +773,7 @@ function NodeEditPanel({
             <select className="input text-sm" value={defaultNext} onChange={(e) => setDefaultNext(e.target.value)}>
               <option value="">— нет —</option>
               {otherNodes.map((n) => (
-                <option key={n.id} value={n.id}>{(n.data as FlowNode).label}</option>
+                <option key={n.id} value={n.id}>{(n.data as unknown as FlowNode).label}</option>
               ))}
             </select>
           </div>
@@ -951,7 +951,12 @@ function FlowEditor({ form, onSaved }: { form: FormTemplate; onSaved: () => void
       id,
       type: "stepNode",
       position,
-      data: { id, type, label: STEP_LABELS[type], options: type === "choice" ? [] : undefined } as FlowNode,
+      data: {
+        id,
+        type,
+        label: STEP_LABELS[type],
+        options: type === "choice" ? [] : undefined,
+      } as unknown as Record<string, unknown>,
     };
     setNodes((ns) => [...ns, newNode]);
     setSelectedNode(newNode);
@@ -1173,7 +1178,7 @@ function FlowEditor({ form, onSaved }: { form: FormTemplate; onSaved: () => void
             <Controls />
             <MiniMap
               nodeColor={(n) => {
-                const t = (n.data as FlowNode).type;
+                const t = (n.data as unknown as FlowNode).type;
                 return t === "start" ? "#22c55e" : t === "confirm" ? "#16a34a" : t === "choice" ? "#a855f7" : t === "date" ? "#3b82f6" : t === "number" ? "#f97316" : "#9ca3af";
               }}
               style={{ background: "#f0f4f0", border: "1px solid #d1d5db" }}
