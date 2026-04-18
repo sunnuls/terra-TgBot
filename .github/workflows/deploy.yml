@@ -27,30 +27,38 @@ jobs:
           set -euo pipefail
           ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "
             set -e
+            _sctl() {
+              if [ \"\$(id -u)\" -eq 0 ]; then systemctl \"\$@\"
+              else sudo -n systemctl \"\$@\"; fi
+            }
+            _jctl() {
+              if [ \"\$(id -u)\" -eq 0 ]; then journalctl \"\$@\"
+              else sudo -n journalctl \"\$@\"; fi
+            }
             cd \"$WORKDIR\"
             echo '--- deploy context ---'
             echo \"WORKDIR=$WORKDIR\"
             pwd
             ls -la | head -n 80
             echo '--- systemd unit (effective) ---'
-            systemctl show -p FragmentPath,DropInPaths,WorkingDirectory,ExecStart terra-api || true
-            systemctl cat terra-api --no-pager || true
+            _sctl show -p FragmentPath,DropInPaths,WorkingDirectory,ExecStart terra-api || true
+            _sctl cat terra-api --no-pager || true
             echo '--- git repo check ---'
             test -d .git || (echo 'ERROR: WORKDIR is not a git repo (no .git). Check WORKDIR secret vs server path.' && exit 2)
             git pull --rebase
             echo '--- server repo ---'
             pwd
-            export GIT_SHA=$(git rev-parse --short HEAD)
-            echo \"GIT_SHA=$GIT_SHA\"
+            export GIT_SHA=\$(git rev-parse --short HEAD)
+            echo \"GIT_SHA=\$GIT_SHA\"
             echo '--- write GIT_SHA into backend .env (optional) ---'
             BE_ENV=\"$WORKDIR/backend/.env\"
-            touch \"$BE_ENV\"
-            (grep -v '^GIT_SHA=' \"$BE_ENV\" || true; echo \"GIT_SHA=$GIT_SHA\") > \"$BE_ENV.tmp\"
-            mv \"$BE_ENV.tmp\" \"$BE_ENV\"
+            touch \"\$BE_ENV\"
+            (grep -v '^GIT_SHA=' \"\$BE_ENV\" || true; echo \"GIT_SHA=\$GIT_SHA\") > \"\$BE_ENV.tmp\"
+            mv \"\$BE_ENV.tmp\" \"\$BE_ENV\"
             git log -1 --oneline
             echo '--- precheck systemd ---'
             whoami
-            systemctl is-active terra-api || true
+            _sctl is-active terra-api || true
             echo '--- update backend deps ---'
             if [ -x \"$WORKDIR/backend/.venv/bin/pip\" ]; then
               \"$WORKDIR/backend/.venv/bin/pip\" install -r \"$WORKDIR/backend/requirements.txt\"
@@ -59,10 +67,10 @@ jobs:
               exit 3
             fi
             echo '--- restart API ---'
-            systemctl restart terra-api
-            systemctl status terra-api --no-pager | head -n 60
+            _sctl restart terra-api
+            _sctl status terra-api --no-pager | head -n 60
             echo '--- recent logs (journalctl) ---'
-            journalctl -u terra-api -n 120 --no-pager || true
+            _jctl -u terra-api -n 120 --no-pager || true
             echo '--- process check ---'
             ps -ef | grep uvicorn | grep -v grep || true
           "
