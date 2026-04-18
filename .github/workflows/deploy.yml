@@ -21,8 +21,8 @@ jobs:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
           SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
-          # Must match bot systemd WorkingDirectory/ExecStart path on the server (see bot_polya.service)
-          WORKDIR: ${{ secrets.WORKDIR || '/opt/bot' }}
+          # Каталог git-репозитория на сервере (должен совпадать с WorkingDirectory в systemd / путём к venv)
+          WORKDIR: ${{ secrets.WORKDIR || '/opt/terra_app' }}
         run: |
           set -euo pipefail
           ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "
@@ -33,8 +33,8 @@ jobs:
             pwd
             ls -la | head -n 80
             echo '--- systemd unit (effective) ---'
-            systemctl show -p FragmentPath,DropInPaths,WorkingDirectory,ExecStart bot_polya || true
-            systemctl cat bot_polya --no-pager || true
+            systemctl show -p FragmentPath,DropInPaths,WorkingDirectory,ExecStart terra-api || true
+            systemctl cat terra-api --no-pager || true
             echo '--- git repo check ---'
             test -d .git || (echo 'ERROR: WORKDIR is not a git repo (no .git). Check WORKDIR secret vs server path.' && exit 2)
             git pull --rebase
@@ -42,22 +42,27 @@ jobs:
             pwd
             export GIT_SHA=$(git rev-parse --short HEAD)
             echo \"GIT_SHA=$GIT_SHA\"
-            echo '--- write GIT_SHA into .env (for /version) ---'
-            touch .env
-            (grep -v '^GIT_SHA=' .env || true; echo \"GIT_SHA=$GIT_SHA\") > .env.tmp
-            mv .env.tmp .env
+            echo '--- write GIT_SHA into backend .env (optional) ---'
+            BE_ENV=\"$WORKDIR/backend/.env\"
+            touch \"$BE_ENV\"
+            (grep -v '^GIT_SHA=' \"$BE_ENV\" || true; echo \"GIT_SHA=$GIT_SHA\") > \"$BE_ENV.tmp\"
+            mv \"$BE_ENV.tmp\" \"$BE_ENV\"
             git log -1 --oneline
             echo '--- precheck systemd ---'
             whoami
-            systemctl is-active bot_polya || true
-            echo '--- update deps ---'
-            \"$WORKDIR/venv/bin/python\" -m pip install -r requirements.txt
-            echo '--- restart bot ---'
-            systemctl restart bot_polya
-            systemctl status bot_polya --no-pager | head -n 60
+            systemctl is-active terra-api || true
+            echo '--- update backend deps ---'
+            if [ -x \"$WORKDIR/backend/.venv/bin/pip\" ]; then
+              \"$WORKDIR/backend/.venv/bin/pip\" install -r \"$WORKDIR/backend/requirements.txt\"
+            else
+              echo 'ERROR: backend/.venv not found. On server: cd backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'
+              exit 3
+            fi
+            echo '--- restart API ---'
+            systemctl restart terra-api
+            systemctl status terra-api --no-pager | head -n 60
             echo '--- recent logs (journalctl) ---'
-            journalctl -u bot_polya -n 120 --no-pager || true
+            journalctl -u terra-api -n 120 --no-pager || true
             echo '--- process check ---'
-            ps -ef | grep bot_polya.py | grep -v grep || true
+            ps -ef | grep uvicorn | grep -v grep || true
           "
-

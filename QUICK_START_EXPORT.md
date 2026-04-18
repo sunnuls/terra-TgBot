@@ -49,8 +49,10 @@ AUTO_EXPORT_CRON=0 9 * * 1
 
 ## Шаг 4: Первый запуск
 
+См. **[README_APP.md](README_APP.md)** — экспорт и API идут через backend Terra App.
+
 ```bash
-python bot_polya.py
+cd backend && .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 При первом запуске откроется браузер для авторизации Google:

@@ -76,8 +76,7 @@ def refresh_token():
         print("✅ УСПЕХ! Токен успешно обновлен!")
         print("=" * 60)
         print(f"\n✓ Токен сохранен в: {TOKEN_JSON_PATH}")
-        print("\nТеперь вы можете запустить бота:")
-        print("   python bot_polya.py")
+        print("\nДальше используйте токен в backend (переменные GOOGLE_* / файлы), см. README_APP.md.")
         print()
         
         return True

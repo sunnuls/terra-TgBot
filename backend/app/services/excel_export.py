@@ -1,5 +1,5 @@
 """
-Excel export service — ported from bot_polya.py build_accounting_excel()
+Excel export service — accounting export format (legacy spreadsheet layout).
 """
 import asyncio
 from datetime import date
@@ -34,7 +34,7 @@ def _bold_center(cell, value, fill=None):
 async def build_accounting_excel(rows: list, date_from: date, date_to: date, filepath: str):
     """
     Build ЗП-ОТД Excel: worker name | total hours per period.
-    Matches the existing bot_polya.py format.
+    Matches the legacy spreadsheet column layout used for accounting exports.
     """
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _build_accounting_sync, rows, date_from, date_to, filepath)

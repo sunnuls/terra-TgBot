@@ -1,4 +1,12 @@
-# Changelog - Bot Polya
+# Changelog
+
+## 2026-04 — Удалён legacy Telegram-бот (aiogram)
+
+Удалены `bot_polya.py`, резервные копии, `mini.py`, `test_bot.py`, unit `bot_polya.service`, корневой `Dockerfile` и `docker-compose.yml`, заточенные под бота. Продакшен — Terra App (`backend/`, см. README_APP.md). Пример systemd для API: `terra-api.service.example`.
+
+---
+
+## История (старый Telegram-бот)
 
 ## Версия 2.1 - Добавлена функция перерегистрации
 
@@ -47,7 +55,7 @@
 
 ### 🧪 Тестирование:
 
-- Синтаксис проверен: `python -m py_compile bot_polya.py` ✅
+- Синтаксис проверен (legacy) ✅
 - Все функции корректно импортируются
 - Структура базы данных соответствует ожиданиям
 

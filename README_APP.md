@@ -1,6 +1,6 @@
 # TerraApp — Corporate Mobile Platform
 
-Self-hosted corporate platform with React Native mobile app (iOS + Android), React AdminPanel, and FastAPI backend. Migrated from the existing Telegram bot (`bot_polya.py`).
+Self-hosted corporate platform with React Native mobile app (iOS + Android), React AdminPanel, and FastAPI backend.
 
 ## Quick Start (Development)
 
@@ -167,4 +167,4 @@ eas build --platform all
 - **Auth**: JWT (access 15 min + refresh 30 days in Redis), bcrypt
 - **Realtime**: FastAPI WebSocket + in-process broadcast (scale with Redis pub/sub)
 - **Push**: Expo Push Notification API (FCM + APNs abstraction)
-- **Export**: openpyxl — ported from existing bot_polya.py
+- **Export**: openpyxl

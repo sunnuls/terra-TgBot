@@ -1,16 +1,13 @@
 services:
-  - type: worker
-    name: telegram-bot-polya
+  - type: web
+    name: terra-app-api
     env: python
+    rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: python bot_polya.py
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: "3.12.0"
       - key: TZ
         value: Europe/Moscow
-    # Добавьте остальные переменные окружения через Render Dashboard
-
-
-

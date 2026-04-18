@@ -1,0 +1,26 @@
+# Пример systemd-юнита для FastAPI (Terra App).
+# Скопируйте в /etc/systemd/system/terra-api.service, поправьте пути и пользователя, затем:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now terra-api
+#
+# Рабочий каталог — папка backend (там лежит app.main).
+
+[Unit]
+Description=Terra App API (FastAPI / uvicorn)
+After=network.target postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+Group=YOUR_LINUX_GROUP
+WorkingDirectory=/home/YOUR_LINUX_USER/terra_app/backend
+Environment="PATH=/home/YOUR_LINUX_USER/terra_app/backend/.venv/bin"
+ExecStart=/home/YOUR_LINUX_USER/terra_app/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=terra-api
+
+[Install]
+WantedBy=multi-user.target

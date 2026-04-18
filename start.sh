@@ -1,40 +1,27 @@
 #!/bin/bash
-# Скрипт для запуска бота на Linux сервере
+# Запуск API Terra App (FastAPI) на Linux-сервере
 
-set -e
+set -euo pipefail
 
-echo "🚀 Запуск Telegram бота..."
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+BACKEND="$ROOT/backend"
 
-# Проверка виртуального окружения
-if [ ! -d "venv" ]; then
-    echo "📦 Создание виртуального окружения..."
-    python3 -m venv venv
+echo "=== Terra App API ==="
+
+if [ ! -d "$BACKEND/.venv" ]; then
+  echo "Создаём venv: $BACKEND/.venv"
+  python3 -m venv "$BACKEND/.venv"
 fi
 
-# Активация виртуального окружения
-echo "🔧 Активация виртуального окружения..."
-source venv/bin/activate
+# shellcheck source=/dev/null
+source "$BACKEND/.venv/bin/activate"
+pip install -q --upgrade pip
+pip install -q -r "$BACKEND/requirements.txt"
 
-# Установка/обновление зависимостей
-echo "📥 Установка зависимостей..."
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# Проверка .env файла
-if [ ! -f ".env" ]; then
-    echo "❌ Ошибка: файл .env не найден!"
-    echo "Создайте .env файл на основе env_template.txt"
-    exit 1
+if [ ! -f "$BACKEND/.env" ]; then
+  echo "Нет файла $BACKEND/.env — скопируйте настройки из README_APP / backend (SECRET_KEY, БД и т.д.)."
+  exit 1
 fi
 
-# Проверка базы данных
-if [ ! -f "reports.db" ]; then
-    echo "⚠️  Предупреждение: reports.db не найден. Будет создан новый."
-fi
-
-# Запуск бота
-echo "✅ Запуск бота..."
-python bot_polya.py
-
-
-
+cd "$BACKEND"
+exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}"

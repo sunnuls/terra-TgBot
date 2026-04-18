@@ -160,10 +160,7 @@ AUTO_EXPORT_ENABLED=true
 AUTO_EXPORT_CRON=0 9 * * 1
 ```
 
-После этого просто запустите бота:
-```bash
-python bot_polya.py
-```
+После этого настройте переменные и файлы в **backend** Terra App (см. **[README_APP.md](README_APP.md)**).
 
 ## Дополнительно
 

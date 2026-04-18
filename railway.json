@@ -4,11 +4,8 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python bot_polya.py",
+    "startCommand": "cd backend && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
 }
-
-
-
