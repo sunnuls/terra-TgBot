@@ -6,6 +6,7 @@ import {
   useNodesState,
   useEdgesState,
   useReactFlow,
+  Panel,
   Controls,
   Background,
   BackgroundVariant,
@@ -795,10 +796,81 @@ function NodeEditPanel({
   );
 }
 
+/** Тулбар внутри React Flow (Panel), чтобы клики не перехватывались слоем viewport. */
+function FlowAddStepToolbar({
+  containerRef,
+  setNodes,
+  setSelectedNode,
+  savePending,
+  onSave,
+}: {
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  setNodes: React.Dispatch<React.SetStateAction<Node[]>>;
+  setSelectedNode: React.Dispatch<React.SetStateAction<Node | null>>;
+  savePending: boolean;
+  onSave: () => void;
+}) {
+  const { getViewport } = useReactFlow();
+
+  const addStep = useCallback(
+    (type: StepType) => {
+      const id = `step_${Date.now()}`;
+      const { x: vx, y: vy, zoom } = getViewport();
+      const w = containerRef.current?.clientWidth ?? 600;
+      const h = containerRef.current?.clientHeight ?? 400;
+      const position = {
+        x: (-vx + w / 2) / zoom + (Math.random() - 0.5) * 80,
+        y: (-vy + h / 2) / zoom + (Math.random() - 0.5) * 80,
+      };
+      const newNode: Node = {
+        id,
+        type: "stepNode",
+        position,
+        data: {
+          id,
+          type,
+          label: STEP_LABELS[type],
+          options: type === "choice" ? [] : undefined,
+        } as unknown as Record<string, unknown>,
+      };
+      setNodes((ns) => [...ns, newNode]);
+      setSelectedNode(newNode);
+    },
+    [getViewport, containerRef, setNodes, setSelectedNode]
+  );
+
+  return (
+    <Panel position="top-center" className="!m-0 w-full max-w-none p-0">
+      <div className="select-none flex items-center gap-2 px-4 py-2 border-b bg-white flex-wrap shadow-sm w-full">
+        <span className="text-sm font-semibold text-gray-600 mr-2">+ Добавить шаг:</span>
+        {(["date", "number", "choice", "text"] as StepType[]).map((t) => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => addStep(t)}
+            className="flex items-center gap-1 px-3 py-1.5 text-xs border rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            {STEP_ICONS[t]} {STEP_LABELS[t]}
+          </button>
+        ))}
+        <div className="flex-1 min-w-[8px]" />
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={savePending}
+          className="btn-primary flex items-center gap-1.5 text-sm px-4 py-1.5"
+        >
+          <Save size={14} />
+          {savePending ? "Сохранение..." : "Сохранить схему"}
+        </button>
+      </div>
+    </Panel>
+  );
+}
+
 // ─── Flow Editor ──────────────────────────────────────────────────────────
 function FlowEditor({ form, onSaved }: { form: FormTemplate; onSaved: () => void }) {
   const qc = useQueryClient();
-  const { getViewport } = useReactFlow();
   const containerRef = useRef<HTMLDivElement>(null);
   const [swapSourceId, setSwapSourceId] = useState<string | null>(null);
 
@@ -936,31 +1008,6 @@ function FlowEditor({ form, onSaved }: { form: FormTemplate; onSaved: () => void
     },
     onError: () => toast("error", "Ошибка при сохранении"),
   });
-
-  const addStep = (type: StepType) => {
-    const id = `step_${Date.now()}`;
-    // Calculate center of visible canvas in flow coordinates
-    const { x: vx, y: vy, zoom } = getViewport();
-    const w = containerRef.current?.clientWidth ?? 600;
-    const h = containerRef.current?.clientHeight ?? 400;
-    const position = {
-      x: (-vx + w / 2) / zoom + (Math.random() - 0.5) * 80,
-      y: (-vy + h / 2) / zoom + (Math.random() - 0.5) * 80,
-    };
-    const newNode: Node = {
-      id,
-      type: "stepNode",
-      position,
-      data: {
-        id,
-        type,
-        label: STEP_LABELS[type],
-        options: type === "choice" ? [] : undefined,
-      } as unknown as Record<string, unknown>,
-    };
-    setNodes((ns) => [...ns, newNode]);
-    setSelectedNode(newNode);
-  };
 
   const updateNodeData = (id: string, updates: Partial<FlowNode>) => {
     setNodes((ns) =>
@@ -1126,29 +1173,6 @@ function FlowEditor({ form, onSaved }: { form: FormTemplate; onSaved: () => void
         </div>
       )}
 
-      {/* Toolbar */}
-      <div className="flex items-center gap-2 px-4 py-2 border-b bg-white flex-shrink-0 flex-wrap">
-        <span className="text-sm font-semibold text-gray-600 mr-2">+ Добавить шаг:</span>
-        {(["date", "number", "choice", "text"] as StepType[]).map((t) => (
-          <button
-            key={t}
-            onClick={() => addStep(t)}
-            className="flex items-center gap-1 px-3 py-1.5 text-xs border rounded-lg hover:bg-gray-50 transition-colors"
-          >
-            {STEP_ICONS[t]} {STEP_LABELS[t]}
-          </button>
-        ))}
-        <div className="flex-1" />
-        <button
-          onClick={() => saveMutation.mutate()}
-          disabled={saveMutation.isPending}
-          className="btn-primary flex items-center gap-1.5 text-sm px-4 py-1.5"
-        >
-          <Save size={14} />
-          {saveMutation.isPending ? "Сохранение..." : "Сохранить схему"}
-        </button>
-      </div>
-
       {/* Canvas + edit panel */}
       <div className="flex flex-1 overflow-hidden">
         <DictContext.Provider value={{ dictMap, customDictMeta, kindModes }}>
@@ -1174,6 +1198,13 @@ function FlowEditor({ form, onSaved }: { form: FormTemplate; onSaved: () => void
             zoomOnScroll={false}
             zoomOnDoubleClick={false}
           >
+            <FlowAddStepToolbar
+              containerRef={containerRef}
+              setNodes={setNodes}
+              setSelectedNode={setSelectedNode}
+              savePending={saveMutation.isPending}
+              onSave={() => saveMutation.mutate()}
+            />
             <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#d1d5db" />
             <Controls />
             <MiniMap
@@ -1252,6 +1283,17 @@ const MODE_META: Record<string, { icon: string; label: string; pill: string }> =
   choices: { icon: "🔘", label: "Варианты",  pill: "bg-purple-100 text-purple-700" },
   message: { icon: "💬", label: "Сообщение", pill: "bg-amber-100 text-amber-700" },
 };
+
+function apiErr(e: unknown): string {
+  const ax = e as { response?: { data?: { detail?: unknown }; status?: number }; message?: string };
+  const d = ax.response?.data?.detail;
+  if (typeof d === "string") return d;
+  if (Array.isArray(d))
+    return d.map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : JSON.stringify(x))).join("; ");
+  if (ax.response?.status === 403) return "Недостаточно прав (нужна роль администратора).";
+  if (ax.response?.status === 401) return "Сессия истекла — войдите снова.";
+  return ax.message || "Ошибка сохранения на сервере.";
+}
 
 // ─── Dialog for creating / editing a MachineKind ─────────────────────────
 function KindDialog({
@@ -1421,20 +1463,36 @@ function MachineKindSection({
     }
   }, [initialOpenDialog]);
 
-  const addKind    = useMutation({ mutationFn: (b: Omit<MachineKind, "id">) => dictApi.addKind(b),                            onSuccess: inv });
-  const updateKind = useMutation({ mutationFn: ({ id, ...b }: MachineKind) => dictApi.updateKind(id, b),                      onSuccess: inv });
-  const delKind    = useMutation({ mutationFn: (id: number) => dictApi.delKind(id),                                           onSuccess: inv });
-  const addItem    = useMutation({ mutationFn: (b: Omit<MachineItem, "id">) => dictApi.addItem(b),                            onSuccess: inv });
-  const delItem    = useMutation({ mutationFn: (id: number) => dictApi.delItem(id),                                           onSuccess: inv });
+  const addKind    = useMutation({ mutationFn: (b: Omit<MachineKind, "id">) => dictApi.addKind(b),                            onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const updateKind = useMutation({ mutationFn: ({ id, ...b }: MachineKind) => dictApi.updateKind(id, b),                      onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const delKind    = useMutation({ mutationFn: (id: number) => dictApi.delKind(id),                                           onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const addItem    = useMutation({ mutationFn: (b: Omit<MachineItem, "id">) => dictApi.addItem(b),                            onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const delItem    = useMutation({ mutationFn: (id: number) => dictApi.delItem(id),                                           onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
 
   const handleSave = (data: { title: string; mode: string; options?: string[]; message?: string }) => {
     if (editKind) {
-      updateKind.mutate({ ...editKind, ...data });
+      updateKind.mutate(
+        { ...editKind, ...data },
+        {
+          onSuccess: () => {
+            setShowDialog(false);
+            setEditKind(null);
+            toast("success", "Изменения сохранены");
+          },
+        }
+      );
     } else {
-      addKind.mutate({ ...data, pos: kinds.length });
+      addKind.mutate(
+        { ...data, pos: kinds.length },
+        {
+          onSuccess: () => {
+            setShowDialog(false);
+            setEditKind(null);
+            toast("success", "Тип техники создан");
+          },
+        }
+      );
     }
-    setShowDialog(false);
-    setEditKind(null);
   };
 
   return (
@@ -1757,16 +1815,19 @@ function DictAccordion() {
 
   const { data } = useQuery({ queryKey: ["dict-all"], queryFn: dictApi.all });
 
-  const inv    = () => qc.invalidateQueries({ queryKey: ["dict-all"] });
-  const addAct   = useMutation({ mutationFn: (v: { name: string; grp: string }) => dictApi.addActivity({ ...v, pos: 0 }), onSuccess: inv });
-  const delAct   = useMutation({ mutationFn: (id: number) => dictApi.delActivity(id), onSuccess: inv });
-  const updAct   = useMutation({ mutationFn: ({ id, ...b }: Activity) => dictApi.updateActivity(id, b), onSuccess: inv });
-  const addLoc   = useMutation({ mutationFn: (v: { name: string; grp: string }) => dictApi.addLocation({ ...v, pos: 0 }), onSuccess: inv });
-  const delLoc   = useMutation({ mutationFn: (id: number) => dictApi.delLocation(id), onSuccess: inv });
-  const updLoc   = useMutation({ mutationFn: ({ id, ...b }: Location) => dictApi.updateLocation(id, b), onSuccess: inv });
-  const addCrop  = useMutation({ mutationFn: (v: string) => dictApi.addCrop({ name: v, pos: 0 }), onSuccess: inv });
-  const delCrop  = useMutation({ mutationFn: (name: string) => dictApi.delCrop(name), onSuccess: inv });
-  const updCrop  = useMutation({ mutationFn: ({ name, ...b }: Crop) => dictApi.updateCrop(name, b), onSuccess: inv });
+  const inv = () =>
+    qc.invalidateQueries({ queryKey: ["dict-all"] }).then(() =>
+      qc.refetchQueries({ queryKey: ["dict-all"] })
+    );
+  const addAct   = useMutation({ mutationFn: (v: { name: string; grp: string }) => dictApi.addActivity({ ...v, pos: 0 }), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const delAct   = useMutation({ mutationFn: (id: number) => dictApi.delActivity(id), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const updAct   = useMutation({ mutationFn: ({ id, ...b }: Activity) => dictApi.updateActivity(id, b), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const addLoc   = useMutation({ mutationFn: (v: { name: string; grp: string }) => dictApi.addLocation({ ...v, pos: 0 }), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const delLoc   = useMutation({ mutationFn: (id: number) => dictApi.delLocation(id), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const updLoc   = useMutation({ mutationFn: ({ id, ...b }: Location) => dictApi.updateLocation(id, b), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const addCrop  = useMutation({ mutationFn: (v: string) => dictApi.addCrop({ name: v, pos: 0 }), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const delCrop  = useMutation({ mutationFn: (name: string) => dictApi.delCrop(name), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const updCrop  = useMutation({ mutationFn: ({ name, ...b }: Crop) => dictApi.updateCrop(name, b), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
   const renameCrop = useMutation({
     mutationFn: ({ from, to }: { from: string; to: string }) => dictApi.updateCrop(from, { name: to }),
     onSuccess: inv,
@@ -1775,12 +1836,12 @@ function DictAccordion() {
       toast("error", typeof d === "string" ? d : "Не удалось переименовать");
     },
   });
-  const addCustomDict  = useMutation({ mutationFn: (name: string) => dictApi.addCustomDict(name), onSuccess: (cd: CustomDict) => { inv(); setOpenCustom(cd.id); } });
-  const renameCustom   = useMutation({ mutationFn: ({ id, name }: { id: number; name: string }) => dictApi.renameCustomDict(id, name), onSuccess: inv });
-  const delCustomDict  = useMutation({ mutationFn: (id: number) => dictApi.delCustomDict(id), onSuccess: inv });
-  const addCustomItem  = useMutation({ mutationFn: ({ id, v }: { id: number; v: string }) => dictApi.addCustomItem(id, v), onSuccess: inv });
-  const delCustomItem  = useMutation({ mutationFn: (id: number) => dictApi.delCustomItem(id), onSuccess: inv });
-  const updCustomItem  = useMutation({ mutationFn: ({ id, ...b }: CustomDictItem) => dictApi.updateCustomItem(id, b), onSuccess: inv });
+  const addCustomDict  = useMutation({ mutationFn: (name: string) => dictApi.addCustomDict(name), onSuccess: (cd: CustomDict) => { void inv(); setOpenCustom(cd.id); }, onError: (e) => toast("error", apiErr(e)) });
+  const renameCustom   = useMutation({ mutationFn: ({ id, name }: { id: number; name: string }) => dictApi.renameCustomDict(id, name), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const delCustomDict  = useMutation({ mutationFn: (id: number) => dictApi.delCustomDict(id), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const addCustomItem  = useMutation({ mutationFn: ({ id, v }: { id: number; v: string }) => dictApi.addCustomItem(id, v), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const delCustomItem  = useMutation({ mutationFn: (id: number) => dictApi.delCustomItem(id), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
+  const updCustomItem  = useMutation({ mutationFn: ({ id, ...b }: CustomDictItem) => dictApi.updateCustomItem(id, b), onSuccess: inv, onError: (e) => toast("error", apiErr(e)) });
 
   const techActs   = data?.activities.filter((a) => a.grp === "техника") ?? [];
   const handActs   = data?.activities.filter((a) => a.grp === "ручная")  ?? [];
